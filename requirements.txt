@@ -1,0 +1,136 @@
+# ==============================================================================
+# NTIRE 2025 Image Super-Resolution - Complete Requirements
+# ==============================================================================
+# Install with: pip install -r requirements.txt
+#
+# For GPU support, install PyTorch first:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+#
+# Tested on: Python 3.8-3.10, PyTorch 2.0-2.2, CUDA 11.8-12.1
+# ==============================================================================
+
+# ==============================================================================
+# CORE DEEP LEARNING
+# ==============================================================================
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0  # Optional, for some audio-visual models
+
+# ==============================================================================
+# NEURAL NETWORK UTILITIES
+# ==============================================================================
+timm>=0.9.0                 # PyTorch Image Models (HAT, Vision Transformers)
+einops>=0.6.0               # Tensor operations (MambaIR, attention)
+fvcore>=0.1.5               # Facebook Research utilities
+
+# ==============================================================================
+# IMAGE PROCESSING
+# ==============================================================================
+Pillow>=9.5.0               # Image loading/saving
+opencv-python>=4.7.0        # Image manipulation
+opencv-python-headless>=4.7.0  # For servers without display
+
+# ==============================================================================
+# SCIENTIFIC COMPUTING
+# ==============================================================================
+numpy>=1.24.0               # Array operations
+scipy>=1.10.0               # Scientific computing (filters, wavelets)
+scikit-image>=0.20.0        # SSIM, image metrics
+
+# ==============================================================================
+# VISUALIZATION & UI
+# ==============================================================================
+matplotlib>=3.7.0           # Plotting, visualization
+tqdm>=4.65.0                # Progress bars
+tensorboard>=2.12.0         # Training visualization (optional)
+
+# ==============================================================================
+# CONFIGURATION & UTILITIES
+# ==============================================================================
+pyyaml>=6.0                 # YAML config parsing
+omegaconf>=2.3.0            # Advanced config management (optional)
+
+# ==============================================================================
+# PERCEPTUAL METRICS (Track B - Perceptual Quality)
+# ==============================================================================
+lpips>=0.1.4                # Learned Perceptual Image Patch Similarity
+pyiqa>=0.1.7                # Image Quality Assessment (CLIP-IQA, MANIQA, MUSIQ, NIQE, DISTS)
+
+# ==============================================================================
+# VGG PERCEPTUAL LOSS
+# ==============================================================================
+# VGG19 is automatically downloaded from torchvision
+# No additional package needed, but ensure torchvision is installed
+
+# ==============================================================================
+# WAVELET TRANSFORMS (SWT Frequency Loss)
+# ==============================================================================
+PyWavelets>=1.4.0           # Discrete/Stationary Wavelet Transform
+
+# ==============================================================================
+# TSD-SR DIFFUSION REFINEMENT (Track B)
+# ==============================================================================
+safetensors>=0.3.0          # Fast, safe model weight loading
+diffusers>=0.21.0           # Diffusion models (VAE, schedulers)
+accelerate>=0.20.0          # Hugging Face accelerate (distributed training)
+transformers>=4.30.0        # CLIP text encoder (for conditioning)
+
+# ==============================================================================
+# CLIP SEMANTIC LOSS (Optional)
+# ==============================================================================
+# git+https://github.com/openai/CLIP.git  # OpenAI CLIP (uncomment to install)
+ftfy>=6.1.0                 # Text cleaning for CLIP
+regex>=2023.0               # Regex for CLIP tokenizer
+
+# ==============================================================================
+# MAMBA / STATE SPACE MODELS (MambaIR - Optional)
+# ==============================================================================
+# Note: mamba-ssm requires CUDA compilation
+# Only install if you have CUDA and want to use MambaIR:
+# pip install mamba-ssm causal-conv1d
+
+# ==============================================================================
+# DEVELOPMENT & TESTING
+# ==============================================================================
+pytest>=7.0.0               # Testing framework
+pytest-cov>=4.0.0           # Test coverage
+black>=23.0.0               # Code formatting
+isort>=5.12.0               # Import sorting
+flake8>=6.0.0               # Linting
+
+# ==============================================================================
+# JUPYTER NOTEBOOKS (Optional)
+# ==============================================================================
+jupyter>=1.0.0              # Jupyter notebooks
+ipywidgets>=8.0.0           # Interactive widgets
+ipython>=8.0.0              # Enhanced Python shell
+
+# ==============================================================================
+# OPTIONAL: ADVANCED FEATURES
+# ==============================================================================
+# wandb>=0.15.0             # Weights & Biases logging (alternative to TensorBoard)
+# kornia>=0.6.0             # GPU-accelerated augmentations
+# albumentations>=1.3.0     # Advanced augmentations
+
+# ==============================================================================
+# PINNED VERSIONS FOR REPRODUCIBILITY (Optional)
+# ==============================================================================
+# Uncomment these for exact version matching:
+# torch==2.1.0
+# torchvision==0.16.0
+# numpy==1.24.3
+# scipy==1.11.1
+# Pillow==10.0.0
+# opencv-python==4.8.0.74
+# timm==0.9.7
+# einops==0.7.0
+# lpips==0.1.4
+# pyiqa==0.1.7
+# PyWavelets==1.4.1
+# safetensors==0.3.3
+# diffusers==0.21.4
+# transformers==4.33.2
+
+# ==============================================================================
+# END OF REQUIREMENTS
+# ==============================================================================

@@ -1,0 +1,150 @@
+# ==============================================================================
+# NTIRE 2025 Image Super-Resolution - Git Ignore
+# ==============================================================================
+
+# ==============================================================================
+# PRETRAINED WEIGHTS & CHECKPOINTS (Large files)
+# ==============================================================================
+# Training checkpoints
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+
+# Pretrained model weights
+pretrained/
+*.safetensors
+*.bin
+
+# Exclude specific large model files
+HAT_*.pth
+MambaIR_*.pth
+NAFNet_*.pth
+teacher*.safetensors
+transformer*.safetensors
+vae*.safetensors
+
+# ==============================================================================
+# PYTHON ARTIFACTS
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ==============================================================================
+# VIRTUAL ENVIRONMENTS
+# ==============================================================================
+venv/
+ENV/
+env/
+.venv/
+.conda/
+conda-env/
+
+# ==============================================================================
+# IDE & EDITOR
+# ==============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-workspace
+*.sublime-project
+
+# ==============================================================================
+# JUPYTER NOTEBOOKS
+# ==============================================================================
+.ipynb_checkpoints/
+*.ipynb
+
+# ==============================================================================
+# OS FILES
+# ==============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ==============================================================================
+# LOGS & TEMPORARY FILES
+# ==============================================================================
+logs/
+*.log
+*.tmp
+*.temp
+*.cache
+
+# TensorBoard
+runs/
+tensorboard/
+
+# ==============================================================================
+# DATA & RESULTS (Large directories)
+# ==============================================================================
+# Dataset (download separately)
+data/
+dataset/
+
+# Output results (can be large)
+outputs/
+results/
+
+# ==============================================================================
+# SECRETS & CREDENTIALS
+# ==============================================================================
+.env
+.env.local
+*.key
+*.pem
+secrets/
+
+# ==============================================================================
+# MISCELLANEOUS
+# ==============================================================================
+*.bak
+*.orig
+.cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# ==============================================================================
+# KEEP IMPORTANT DIRECTORIES (add .gitkeep files)
+# ==============================================================================
+# To keep empty directories, add a .gitkeep file:
+# checkpoints/.gitkeep
+# pretrained/.gitkeep
+# data/.gitkeep
+# outputs/.gitkeep
+# results/.gitkeep
