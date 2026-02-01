@@ -1,28 +1,29 @@
 # ==============================================================================
 # NTIRE 2025 Image Super-Resolution - Git Ignore
 # ==============================================================================
+# Only excludes large binary files (pretrained weights, model checkpoints)
+# All source code, configs, and scripts should be committed
+# ==============================================================================
 
 # ==============================================================================
-# PRETRAINED WEIGHTS & CHECKPOINTS (Large files)
+# PRETRAINED MODEL WEIGHTS (Large binary files)
 # ==============================================================================
-# Training checkpoints
-checkpoints/
+# PyTorch checkpoints
 *.pth
 *.pt
 *.ckpt
-
-# Pretrained model weights
-pretrained/
-*.safetensors
 *.bin
 
-# Exclude specific large model files
-HAT_*.pth
-MambaIR_*.pth
-NAFNet_*.pth
-teacher*.safetensors
-transformer*.safetensors
-vae*.safetensors
+# Safetensors format
+*.safetensors
+
+# ONNX models
+*.onnx
+
+# ==============================================================================
+# SPECIFIC WEIGHT DIRECTORIES
+# ==============================================================================
+checkpoints/pretrained_weights/
 
 # ==============================================================================
 # PYTHON ARTIFACTS
@@ -56,7 +57,6 @@ ENV/
 env/
 .venv/
 .conda/
-conda-env/
 
 # ==============================================================================
 # IDE & EDITOR
@@ -67,84 +67,47 @@ conda-env/
 *.swo
 *~
 .project
-.pydevproject
-.settings/
-*.sublime-workspace
-*.sublime-project
 
 # ==============================================================================
 # JUPYTER NOTEBOOKS
 # ==============================================================================
 .ipynb_checkpoints/
-*.ipynb
 
 # ==============================================================================
 # OS FILES
 # ==============================================================================
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
 Thumbs.db
 desktop.ini
 
 # ==============================================================================
-# LOGS & TEMPORARY FILES
+# LOGS & CACHE
 # ==============================================================================
-logs/
 *.log
-*.tmp
-*.temp
 *.cache
+.pytest_cache/
 
 # TensorBoard
 runs/
-tensorboard/
 
 # ==============================================================================
-# DATA & RESULTS (Large directories)
+# LARGE DATASET FILES (users download separately)
 # ==============================================================================
-# Dataset (download separately)
-data/
-dataset/
-
-# Output results (can be large)
-outputs/
-results/
-
-# ==============================================================================
-# SECRETS & CREDENTIALS
-# ==============================================================================
-.env
-.env.local
-*.key
-*.pem
-secrets/
+# Only ignore actual image files in data, not the directory structure
+data/**/*.png
+data/**/*.jpg
+data/**/*.jpeg
+data/**/*.bmp
+data/**/*.tif
+data/**/*.tiff
+dataset/**/*.png
+dataset/**/*.jpg
 
 # ==============================================================================
-# MISCELLANEOUS
+# KEEP THESE DIRECTORIES (add .gitkeep to commit empty folders)
 # ==============================================================================
-*.bak
-*.orig
-.cache/
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.nox/
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-
-# ==============================================================================
-# KEEP IMPORTANT DIRECTORIES (add .gitkeep files)
-# ==============================================================================
-# To keep empty directories, add a .gitkeep file:
-# checkpoints/.gitkeep
-# pretrained/.gitkeep
-# data/.gitkeep
-# outputs/.gitkeep
-# results/.gitkeep
+# Don't ignore these - we want the structure:
+# !checkpoints/.gitkeep
+# !pretrained/.gitkeep
+# !outputs/.gitkeep
+# !results/.gitkeep
