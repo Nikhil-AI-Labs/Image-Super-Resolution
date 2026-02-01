@@ -1,0 +1,11 @@
+{
+  "baseline": {
+    "metrics": {
+      "psnr": 13.207506819304717,
+      "ssim": 0.0560011292497317,
+      "avg_inference_time": 0.005943139394124349,
+      "total_samples": 3
+    },
+    "total_time": 1.2287039756774902
+  }
+}
