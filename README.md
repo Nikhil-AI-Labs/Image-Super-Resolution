@@ -1,4 +1,4 @@
-# 🏆 NTIRE 2025 Image Super-Resolution Challenge
+# 🏆 NTIRE 2026 Image Super-Resolution Challenge
 
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
