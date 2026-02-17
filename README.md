@@ -4,7 +4,7 @@
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> **A 7-phase, multi-expert super-resolution pipeline combining frozen expert ensembles, multi-domain frequency decomposition, hierarchical fusion, and diffusion refinement — engineered for championship-level PSNR on the NTIRE 2025 Challenge.**
+> **A 7-phase, multi-expert super-resolution pipeline combining frozen expert ensembles, multi-domain frequency decomposition, hierarchical fusion, and diffusion refinement — engineered for championship-level PSNR on the NTIRE 2026 Challenge.**
 
 ---
 
