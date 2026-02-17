@@ -1225,46 +1225,58 @@ class CombinedLoss(nn.Module):
         losses = {}
         total_loss = torch.tensor(0.0, device=pred.device)
         
-        # Stage 1: Basic pixel losses (always active)
-        losses['l1'] = self.l1_loss(pred, target)
-        losses['charbonnier'] = self.charbonnier_loss(pred, target)
+        # =====================================================================
+        # PURELY WEIGHT-DRIVEN: compute each loss only when its weight > 0.
+        # No more stage gates — the YAML config weights are the single source
+        # of truth. If weight == 0, the loss is not computed (saves compute).
+        # =====================================================================
         
-        total_loss += self.weights['l1'] * losses['l1']
-        total_loss += self.weights['charbonnier'] * losses['charbonnier']
+        # Basic pixel losses
+        if self.weights.get('l1', 0) > 0:
+            losses['l1'] = self.l1_loss(pred, target)
+            total_loss = total_loss + self.weights['l1'] * losses['l1']
         
-        # Stage 2: Add perceptual losses
-        if self.current_stage >= 2:
+        if self.weights.get('charbonnier', 0) > 0:
+            losses['charbonnier'] = self.charbonnier_loss(pred, target)
+            total_loss = total_loss + self.weights['charbonnier'] * losses['charbonnier']
+        
+        if self.weights.get('l2', 0) > 0:
             losses['l2'] = self.l2_loss(pred, target)
+            total_loss = total_loss + self.weights['l2'] * losses['l2']
+        
+        # Perceptual / structural losses
+        if self.weights.get('vgg', 0) > 0:
             losses['vgg'] = self.vgg_loss(pred, target)
+            total_loss = total_loss + self.weights['vgg'] * losses['vgg']
+        
+        if self.weights.get('ssim', 0) > 0:
             losses['ssim'] = self.ssim_loss(pred, target)
-            
-            total_loss += self.weights['l2'] * losses['l2']
-            total_loss += self.weights['vgg'] * losses['vgg']
-            total_loss += self.weights['ssim'] * losses['ssim']
+            total_loss = total_loss + self.weights['ssim'] * losses['ssim']
         
-        # Stage 3: Add frequency and edge losses
-        if self.current_stage >= 3:
+        # Edge loss
+        if self.weights.get('edge', 0) > 0:
             losses['edge'] = self.edge_loss(pred, target)
-            total_loss += self.weights['edge'] * losses['edge']
-            
-            if self.use_fft:
-                losses['fft'] = self.fft_loss(pred, target)
-                total_loss += self.weights['fft'] * losses['fft']
-            
-            if self.use_swt:
-                try:
-                    losses['swt'] = self.swt_loss(pred, target)
-                    total_loss += self.weights['swt'] * losses['swt']
-                except Exception as e:
-                    # Fallback to FFT if SWT fails
-                    if self.use_fft and 'fft' not in losses:
-                        losses['fft'] = self.fft_loss(pred, target)
-                        total_loss += self.weights['fft'] * losses['fft']
+            total_loss = total_loss + self.weights['edge'] * losses['edge']
         
-        # Track B: Add CLIP loss
-        if self.use_clip and self.weights['clip'] > 0:
+        # Frequency losses
+        if self.use_fft and self.weights.get('fft', 0) > 0:
+            losses['fft'] = self.fft_loss(pred, target)
+            total_loss = total_loss + self.weights['fft'] * losses['fft']
+        
+        if self.use_swt and self.weights.get('swt', 0) > 0:
+            try:
+                losses['swt'] = self.swt_loss(pred, target)
+                total_loss = total_loss + self.weights['swt'] * losses['swt']
+            except Exception:
+                # Fallback to FFT if SWT fails
+                if self.use_fft and 'fft' not in losses:
+                    losses['fft'] = self.fft_loss(pred, target)
+                    total_loss = total_loss + self.weights['fft'] * losses['fft']
+        
+        # CLIP loss (Track B)
+        if self.use_clip and self.weights.get('clip', 0) > 0:
             losses['clip'] = self.clip_loss(pred, target)
-            total_loss += self.weights['clip'] * losses['clip']
+            total_loss = total_loss + self.weights['clip'] * losses['clip']
         
         if return_components:
             return total_loss, losses

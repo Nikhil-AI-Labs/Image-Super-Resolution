@@ -10,12 +10,16 @@ Features:
 - EMA for stable inference
 - TensorBoard logging
 - Automatic checkpointing
+- **CACHED MODE**: 10-20x faster training with pre-computed expert features
 
 Usage:
     python train.py --config configs/train_config.yaml
     
 Resume training:
     python train.py --config configs/train_config.yaml --resume checkpoints/latest.pth
+
+Cached training (10-20x faster!):
+    python train.py --config configs/train_config.yaml --cached --cache-dir dataset/DF2K/cached_features_v2
 
 Author: NTIRE SR Team
 """
@@ -30,6 +34,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import time
+import math
 from typing import Dict, Optional, Tuple, Any
 import random
 import numpy as np
@@ -54,6 +59,11 @@ def parse_args():
                        help='Total epochs (overrides config)')
     parser.add_argument('--debug', action='store_true',
                        help='Debug mode (small dataset, verbose)')
+    # Cached training mode (10-20x faster!)
+    parser.add_argument('--cached', action='store_true',
+                       help='Use cached expert features for 10-20x speedup')
+    parser.add_argument('--cache-dir', type=str, default=None,
+                       help='Path to cached features (default: dataset/DF2K/cached_features_v2)')
     return parser.parse_args()
 
 
@@ -170,8 +180,8 @@ def train_epoch(
     optimizer.zero_grad()
     
     for batch_idx, batch in enumerate(pbar):
-        lr_img = batch['lr'].to(device)
-        hr_img = batch['hr'].to(device)
+        lr_img = batch['lr'].to(device, non_blocking=True)
+        hr_img = batch['hr'].to(device, non_blocking=True)
         
         # Forward pass
         sr_img = model(lr_img)
@@ -238,6 +248,168 @@ def train_epoch(
     }
 
 
+def train_epoch_cached(
+    model: nn.Module,
+    train_loader: DataLoader,
+    criterion,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    epoch: int,
+    config: Dict,
+    logger = None,
+    ema = None
+) -> Dict[str, float]:
+    """
+    Train for one epoch using CACHED expert features.
+    
+    This is 10-20x faster than standard training because expert models
+    (HAT, DAT, NAFNet) are NOT run - their outputs are loaded from disk.
+    
+    The cached dataset provides:
+    - expert_imgs: Dict with pre-computed SR outputs
+    - expert_feats: Dict with pre-computed intermediate features
+    
+    Args:
+        model: CompleteEnhancedFusionSR model (with expert_ensemble=None)
+        train_loader: CachedSRDataset DataLoader
+        criterion: Loss function
+        optimizer: Optimizer
+        device: Device
+        epoch: Current epoch
+        config: Configuration
+        logger: TensorBoard logger
+        ema: EMA model tracker
+        
+    Returns:
+        Dictionary of average metrics
+    """
+    model.train()
+    
+    # Get training config
+    gradient_clip = config['training'].get('gradient_clip', 0)
+    accumulation_steps = config['training'].get('accumulation_steps', 1)
+    print_freq = config['training'].get('print_freq', 10)
+    
+    # Get stage weights — strictly from YAML config
+    stage_num, stage_weights, stage_name = get_loss_stage(epoch, config['loss'])
+    criterion.set_weights(stage_weights)
+    
+    # Metrics tracking
+    total_loss = 0.0
+    loss_components = {}
+    num_batches = len(train_loader)
+    global_step = epoch * num_batches
+    
+    # Progress bar
+    pbar = tqdm(train_loader, desc=f'Epoch {epoch} [CACHED {stage_name}]', ncols=120)
+    
+    optimizer.zero_grad()
+    
+    for batch_idx, batch in enumerate(pbar):
+        # Get LR/HR images
+        lr_img = batch['lr'].to(device, non_blocking=True)
+        hr_img = batch['hr'].to(device, non_blocking=True)
+        
+        # Get pre-computed expert outputs (loaded from disk!)
+        expert_imgs = {k: v.to(device, non_blocking=True) for k, v in batch['expert_imgs'].items()}
+        
+        # Get pre-computed features if available
+        expert_feats = None
+        if 'expert_feats' in batch:
+            expert_feats = {k: v.to(device, non_blocking=True) for k, v in batch['expert_feats'].items()}
+        
+        # Forward pass using PRE-COMPUTED features (10-20x faster!)
+        sr_img = model.forward_with_precomputed(lr_img, expert_imgs, expert_feats)
+        
+        # Ensure correct range
+        sr_img = sr_img.clamp(0, 1)
+        
+        # Calculate loss with components
+        loss, components = criterion(sr_img, hr_img, return_components=True)
+        
+        # Normalize for gradient accumulation
+        loss = loss / accumulation_steps
+        
+        # Backward pass
+        loss.backward()
+        
+        # Accumulate loss components
+        for k, v in components.items():
+            if k not in loss_components:
+                loss_components[k] = 0.0
+            loss_components[k] += v if isinstance(v, float) else v.item()
+        
+        # Update weights every accumulation_steps
+        if (batch_idx + 1) % accumulation_steps == 0:
+            # Gradient clipping
+            if gradient_clip > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    gradient_clip
+                )
+            
+            optimizer.step()
+            optimizer.zero_grad()
+            
+            # Update EMA
+            if ema is not None:
+                ema.update(model)
+        
+        # Track total loss
+        total_loss += loss.item() * accumulation_steps
+        
+        # Update progress bar
+        if batch_idx % print_freq == 0:
+            current_lr = get_current_lr(optimizer)
+            pbar.set_postfix({
+                'loss': f"{loss.item() * accumulation_steps:.4f}",
+                'lr': f"{current_lr:.2e}"
+            })
+        
+        # Log to TensorBoard
+        if logger is not None and batch_idx % print_freq == 0:
+            step = global_step + batch_idx
+            logger.log_scalar('train/loss_iter', loss.item() * accumulation_steps, step)
+            logger.log_learning_rate(get_current_lr(optimizer), step)
+    
+    # Average metrics
+    avg_loss = total_loss / num_batches
+    avg_components = {k: v / num_batches for k, v in loss_components.items()}
+    
+    return {
+        'loss': avg_loss,
+        'stage': stage_num,
+        **avg_components
+    }
+
+
+def center_crop_to_common_size(tensors: list) -> list:
+    """
+    Center crop a list of tensors to the minimum common size.
+    
+    Args:
+        tensors: List of tensors with shape [C, H, W]
+        
+    Returns:
+        List of center-cropped tensors with uniform size
+    """
+    if not tensors:
+        return tensors
+    
+    # Find minimum height and width
+    min_h = min(t.shape[1] for t in tensors)
+    min_w = min(t.shape[2] for t in tensors)
+    
+    cropped = []
+    for t in tensors:
+        _, h, w = t.shape
+        top = (h - min_h) // 2
+        left = (w - min_w) // 2
+        cropped.append(t[:, top:top + min_h, left:left + min_w])
+    
+    return cropped
+
+
 @torch.no_grad()
 def validate_epoch(
     model: nn.Module,
@@ -247,20 +419,24 @@ def validate_epoch(
     config: Dict,
     logger = None,
     log_images: bool = False,
-    ema = None
+    ema = None,
+    cached_mode: bool = False  # NEW: Handle cached validation
 ) -> Dict[str, float]:
     """
     Validate for one epoch.
     
+    Works in both standard mode (live experts) and cached mode (precomputed features).
+    
     Args:
         model: Model to validate
-        val_loader: Validation data loader
+        val_loader: Validation data loader (standard or CachedSRDataset)
         device: Device
         epoch: Current epoch
         config: Configuration
         logger: TensorBoard logger
         log_images: Whether to log images
         ema: EMA model (if using EMA for validation)
+        cached_mode: If True, use precomputed expert features from batch
         
     Returns:
         Dictionary of metrics
@@ -288,11 +464,21 @@ def validate_epoch(
     pbar = tqdm(val_loader, desc='Validation', ncols=100)
     
     for batch_idx, batch in enumerate(pbar):
-        lr_img = batch['lr'].to(device)
-        hr_img = batch['hr'].to(device)
+        lr_img = batch['lr'].to(device, non_blocking=True)
+        hr_img = batch['hr'].to(device, non_blocking=True)
         
-        # Forward pass
-        sr_img = model(lr_img)
+        # Forward pass - handle cached vs standard mode
+        if cached_mode and 'expert_imgs' in batch:
+            # CACHED MODE: Use precomputed expert features
+            expert_imgs = {k: v.to(device, non_blocking=True) for k, v in batch['expert_imgs'].items()}
+            expert_feats = None
+            if 'expert_feats' in batch:
+                expert_feats = {k: v.to(device, non_blocking=True) for k, v in batch['expert_feats'].items()}
+            sr_img = model.forward_with_precomputed(lr_img, expert_imgs, expert_feats)
+        else:
+            # STANDARD MODE: Run live experts
+            sr_img = model(lr_img)
+        
         sr_img = sr_img.clamp(0, 1)
         
         # Update metrics
@@ -324,9 +510,14 @@ def validate_epoch(
         logger.log_scalar('val/ssim', metrics['ssim'], epoch)
         
         if log_images and images_to_log['lr']:
-            lr_batch = torch.stack(images_to_log['lr'])
-            sr_batch = torch.stack(images_to_log['sr'])
-            hr_batch = torch.stack(images_to_log['hr'])
+            # Center crop images to common size (validation images may have different sizes)
+            lr_cropped = center_crop_to_common_size(images_to_log['lr'])
+            sr_cropped = center_crop_to_common_size(images_to_log['sr'])
+            hr_cropped = center_crop_to_common_size(images_to_log['hr'])
+            
+            lr_batch = torch.stack(lr_cropped)
+            sr_batch = torch.stack(sr_cropped)
+            hr_batch = torch.stack(hr_cropped)
             logger.log_images('val/comparison', lr_batch, sr_batch, hr_batch, epoch)
     
     return metrics
@@ -343,7 +534,8 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
     """
     # Imports
     from src.data import create_dataloaders
-    from src.models.fusion_network import FrequencyAwareFusion, MultiFusionSR
+    from src.models.fusion_network import FrequencyAwareFusion
+    from src.models.enhanced_fusion import CompleteEnhancedFusionSR
     from src.losses import CombinedLoss, PYWT_AVAILABLE
     from src.utils import CheckpointManager, TensorBoardLogger, EMAModel
     
@@ -367,6 +559,10 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(gpu_id)}")
         print(f"Memory: {torch.cuda.get_device_properties(gpu_id).total_memory / 1e9:.1f} GB")
+        # Apply cudnn benchmark setting from config (enables kernel auto-tuning)
+        cudnn_benchmark = config['hardware'].get('cudnn_benchmark', True)
+        torch.backends.cudnn.benchmark = cudnn_benchmark
+        print(f"CUDNN Benchmark: {cudnn_benchmark}")
     
     # ========================================================================
     # CREATE DATALOADERS
@@ -378,22 +574,89 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
     dataset_config = config['dataset']
     batch_size = args.batch_size if args and args.batch_size else config['training']['batch_size']
     
-    train_loader, val_loader = create_dataloaders(
-        train_hr_dir=os.path.join(dataset_config['train']['root'], 
-                                   dataset_config['train'].get('hr_subdir', 'train_HR')),
-        train_lr_dir=os.path.join(dataset_config['train']['root'], 
-                                   dataset_config['train'].get('lr_subdir', 'train_LR')),
-        val_hr_dir=os.path.join(dataset_config['val']['root'], 
-                                 dataset_config['val'].get('hr_subdir', 'val_HR')),
-        val_lr_dir=os.path.join(dataset_config['val']['root'], 
-                                 dataset_config['val'].get('lr_subdir', 'val_LR')),
-        batch_size=batch_size,
-        num_workers=config['training']['num_workers'],
-        lr_patch_size=dataset_config['lr_patch_size'],
-        scale=dataset_config['scale'],
-        pin_memory=config['training']['pin_memory'],
-        repeat_factor=dataset_config['repeat_factor']
-    )
+    # Check for cached training mode (10-20x faster!)
+    cached_mode = args and args.cached
+    
+    if cached_mode:
+        # CACHED MODE: Use pre-computed expert features
+        from src.data import CachedSRDataset, create_cached_dataloader
+        
+        # Determine cache directories
+        train_cache_dir = os.path.join(dataset_config['train']['root'], 'cached_features_train')
+        val_cache_dir = os.path.join(dataset_config['val']['root'], 'cached_features_val')
+        
+        # Override with command line if provided
+        if args.cache_dir:
+            train_cache_dir = args.cache_dir
+            # Also check for val cache in same parent
+            val_cache_dir = os.path.join(os.path.dirname(args.cache_dir), 'cached_features_val')
+        
+        print(f"\n  *** CACHED TRAINING MODE ENABLED ***")
+        print(f"  Train cache: {train_cache_dir}")
+        print(f"  Val cache:   {val_cache_dir}")
+        print(f"  Expected speedup: 10-20x faster!\n")
+        
+        # Verify cache directories exist
+        if not os.path.exists(train_cache_dir):
+            raise RuntimeError(
+                f"Train cache not found: {train_cache_dir}\n"
+                f"Run: python scripts/extract_features_balanced.py"
+            )
+        if not os.path.exists(val_cache_dir):
+            raise RuntimeError(
+                f"Validation cache not found: {val_cache_dir}\n"
+                f"Run: python scripts/extract_features_balanced.py\n"
+                f"Both train AND val must be cached!"
+            )
+        
+        # TRAIN LOADER (cached)
+        train_loader = create_cached_dataloader(
+            feature_dir=train_cache_dir,
+            batch_size=batch_size,
+            num_workers=config['training']['num_workers'],
+            augment=True,
+            repeat_factor=dataset_config['repeat_factor'],
+            pin_memory=config['training']['pin_memory'],
+            prefetch_factor=config['training'].get('prefetch_factor', 4),
+            persistent_workers=config['training'].get('persistent_workers', True),
+            load_features=True  # Need features for collaborative learning
+        )
+        
+        # VALIDATION LOADER (cached) - CRITICAL FIX!
+        val_loader = create_cached_dataloader(
+            feature_dir=val_cache_dir,
+            batch_size=1,  # Val uses batch_size=1 for consistent metrics
+            num_workers=4,
+            augment=False,  # No augmentation for validation
+            repeat_factor=1,
+            pin_memory=config['training']['pin_memory'],
+            prefetch_factor=2,
+            persistent_workers=True,
+            load_features=True
+        )
+        
+        print(f"  Train loader: {len(train_loader)} batches")
+        print(f"  Val loader:   {len(val_loader)} batches\n")
+    else:
+        # Standard mode: compute expert features live
+        train_loader, val_loader = create_dataloaders(
+            train_hr_dir=os.path.join(dataset_config['train']['root'], 
+                                       dataset_config['train'].get('hr_subdir', 'train_HR')),
+            train_lr_dir=os.path.join(dataset_config['train']['root'], 
+                                       dataset_config['train'].get('lr_subdir', 'train_LR')),
+            val_hr_dir=os.path.join(dataset_config['val']['root'], 
+                                     dataset_config['val'].get('hr_subdir', 'val_HR')),
+            val_lr_dir=os.path.join(dataset_config['val']['root'], 
+                                     dataset_config['val'].get('lr_subdir', 'val_LR')),
+            batch_size=batch_size,
+            num_workers=config['training']['num_workers'],
+            lr_patch_size=dataset_config['lr_patch_size'],
+            scale=dataset_config['scale'],
+            pin_memory=config['training']['pin_memory'],
+            repeat_factor=dataset_config['repeat_factor'],
+            prefetch_factor=config['training'].get('prefetch_factor', 2),
+            persistent_workers=config['training'].get('persistent_workers', True)
+        )
     
     # ========================================================================
     # CREATE MODEL
@@ -405,46 +668,144 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
     model_config = config['model']
     fusion_config = model_config['fusion']
     
-    # Check if we should load expert models (full MultiFusionSR)
-    if model_config.get('type') == 'MultiFusionSR' and 'experts' in model_config:
+    # Check if we should load expert models (full EnhancedFusionSR with ALL improvements)
+    # In CACHED MODE: Don't load experts - use precomputed features instead
+    if cached_mode:
+        print("\n  *** CACHED MODE: Skipping expert model loading ***")
+        print("  Experts (HAT, DAT, NAFNet) are NOT needed in cached mode!")
+        print("  This saves ~50M parameters and significant GPU memory.\n")
+        
+        # Get improvement settings from config
+        improvements = fusion_config.get('improvements', {})
+        
+        # Create CompleteEnhancedFusionSR with NO experts (expert_ensemble=None)
+        # Phase 1: Pass scaled dimensions from config
+        model = CompleteEnhancedFusionSR(
+            expert_ensemble=None,  # CACHED MODE: no live experts!
+            num_experts=3,
+            upscale=config['dataset'].get('scale', 4),
+            # Phase 1: Scaled dimensions
+            fusion_dim=fusion_config.get('fusion_dim', 64),
+            num_heads=fusion_config.get('num_heads', 4),
+            refine_depth=fusion_config.get('refine_depth', 4),
+            refine_channels=fusion_config.get('refine_channels', 64),
+            enable_hierarchical=fusion_config.get('enable_hierarchical', True),
+            # Phase 2: Multi-domain frequency
+            enable_multi_domain_freq=fusion_config.get('enable_multi_domain_freq', False),
+            # Phase 3: Large Kernel Attention
+            enable_lka=fusion_config.get('enable_lka', False),
+            # Phase 4: Edge enhancement
+            enable_edge_enhance=fusion_config.get('enable_edge_enhance', False),
+            # Improvement toggles
+            enable_dynamic_selection=improvements.get('dynamic_expert_selection', True),
+            enable_cross_band_attn=improvements.get('cross_band_attention', True),
+            enable_adaptive_bands=improvements.get('adaptive_frequency_bands', True),
+            enable_multi_resolution=improvements.get('multi_resolution_fusion', True),
+            enable_collaborative=improvements.get('collaborative_learning', True),
+        ).to(device)
+        
+        target_params = 900_000
+        actual_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"  Phase 1 Scale-Up: {actual_params:,} params (target: ~{target_params:,})")
+        
+        print(f"  Model: CompleteEnhancedFusionSR (CACHED MODE)")
+        print(f"  Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+        print(f"  Expert parameters: 0 (precomputed)")
+        
+    elif model_config.get('type') == 'MultiFusionSR' and 'experts' in model_config:
         # Load expert models
-        from src.models import load_experts, MultiFusionSR
+        from src.models import expert_loader
         
         print("  Loading expert models (frozen)...")
         expert_configs = model_config['experts']
-        expert_names = [e['name'] for e in expert_configs]
-        expert_weights = {e['name']: e['weight_path'] for e in expert_configs}
+        expert_weights = {e['name'].lower(): e.get('weight_path') for e in expert_configs if e.get('weight_path')}
         
-        # Load and freeze experts
-        try:
-            experts = load_experts(expert_names, expert_weights, verbose=True)
-            
-            # Move to device and freeze
-            for name, expert in experts.items():
-                expert.to(device)
-                expert.eval()
-                for param in expert.parameters():
-                    param.requires_grad = False
-                print(f"    ✓ {name}: frozen")
-            
-            # Create MultiFusionSR with experts
-            model = MultiFusionSR(
-                experts=experts,
-                use_teacher=False
-            ).to(device)
-            print(f"  Created MultiFusionSR with {len(experts)} experts")
-            
-        except Exception as e:
-            print(f"  Warning: Failed to load experts: {e}")
-            print("  Falling back to standalone FrequencyAwareFusion...")
-            model = FrequencyAwareFusion(
-                num_experts=fusion_config['num_experts'],
-                use_residual=fusion_config.get('use_residual', True),
-                use_multiscale=fusion_config.get('use_multiscale', True)
-            ).to(device)
+        # Multi-GPU configuration: distribute experts across available GPUs
+        gpu_ids = config['hardware'].get('gpu_ids', [0])
+        expert_devices = None
+        
+        if len(gpu_ids) >= 2 and torch.cuda.device_count() >= 2:
+            # Distribute experts: HAT on GPU 0, DAT+NAFNet on GPU 1
+            expert_devices = {
+                'hat': f'cuda:{gpu_ids[0]}',
+                'dat': f'cuda:{gpu_ids[1]}',
+                'nafnet': f'cuda:{gpu_ids[1]}'
+            }
+            print(f"  [Multi-GPU] Enabling parallel execution:")
+            print(f"    GPU {gpu_ids[0]}: HAT (largest expert)")
+            print(f"    GPU {gpu_ids[1]}: DAT + NAFNet (parallel)")
+        
+        # Create ExpertEnsemble with multi-GPU support
+        ensemble = expert_loader.ExpertEnsemble(
+            upscale=config['dataset'].get('scale', 4),
+            device=device,
+            devices=expert_devices
+        )
+        load_results = ensemble.load_all_experts(
+            checkpoint_paths=expert_weights,
+            freeze=True
+        )
+        
+        # Print load status
+        for name, success in load_results.items():
+            if success:
+                print(f"    ✓ {name}: loaded and frozen")
+            else:
+                print(f"    ⚠ {name}: using random weights (no checkpoint)")
+        
+        # Get improvement settings from config
+        improvements = fusion_config.get('improvements', {})
+        
+        # Create CompleteEnhancedFusionSR with ALL improvements enabled!
+        # Phase 1: Scaled dimensions + hierarchical fusion
+        model = CompleteEnhancedFusionSR(
+            expert_ensemble=ensemble,
+            num_experts=fusion_config.get('num_experts', 3),
+            num_bands=3,
+            block_size=fusion_config.get('block_size', 8),
+            upscale=config['dataset'].get('scale', 4),
+            # Phase 1: Scaled dimensions
+            fusion_dim=fusion_config.get('fusion_dim', 64),
+            num_heads=fusion_config.get('num_heads', 4),
+            refine_depth=fusion_config.get('refine_depth', 4),
+            refine_channels=fusion_config.get('refine_channels', 64),
+            enable_hierarchical=fusion_config.get('enable_hierarchical', True),
+            # Phase 2: Multi-domain frequency
+            enable_multi_domain_freq=fusion_config.get('enable_multi_domain_freq', False),
+            # Phase 3: Large Kernel Attention
+            enable_lka=fusion_config.get('enable_lka', False),
+            # Phase 4: Edge enhancement
+            enable_edge_enhance=fusion_config.get('enable_edge_enhance', False),
+            # Improvement toggles from config
+            enable_dynamic_selection=improvements.get('dynamic_expert_selection', True),
+            enable_cross_band_attn=improvements.get('cross_band_attention', True),
+            enable_adaptive_bands=improvements.get('adaptive_frequency_bands', True),
+            enable_multi_resolution=improvements.get('multi_resolution_fusion', True),
+            enable_collaborative=improvements.get('collaborative_learning', True),
+        )
+        
+        # Move ONLY trainable fusion components to the primary device
+        # DO NOT call model.to(device) - it would override expert device assignments!
+        # Instead, move each trainable submodule individually
+        for name, module in model.named_children():
+            if name != 'expert_ensemble':  # Skip experts - they have their own devices
+                module.to(device)
+        
+        print(f"  Created CompleteEnhancedFusionSR with {len([k for k, v in load_results.items() if v])} loaded experts")
+        print(f"  Improvements enabled:")
+        print(f"    • Dynamic Expert Selection: {improvements.get('dynamic_expert_selection', True)}")
+        print(f"    • Cross-Band Attention: {improvements.get('cross_band_attention', True)}")
+        print(f"    • Adaptive Frequency Bands: {improvements.get('adaptive_frequency_bands', True)}")
+        print(f"    • Multi-Resolution Fusion: {improvements.get('multi_resolution_fusion', True)}")
+        print(f"    • Collaborative Learning: {improvements.get('collaborative_learning', True)}")
+        print(f"  Trainable parameters: {model.get_trainable_params():,}")
+        
     else:
-        # Standalone fusion network (for testing or when experts not available)
+        # Standalone fusion network (for testing only - requires manual expert outputs)
+        from src.models.fusion_network import FrequencyAwareFusion
+        
         print("  Creating standalone FrequencyAwareFusion...")
+        print("  WARNING: Standalone mode requires external expert outputs!")
         model = FrequencyAwareFusion(
             num_experts=fusion_config['num_experts'],
             use_residual=fusion_config.get('use_residual', True),
@@ -457,6 +818,30 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
     print(f"  Trainable parameters: {trainable_params:,}")
     print(f"  Total parameters: {total_params:,}")
     
+    # Multi-GPU verification
+    if hasattr(model, 'expert_ensemble') and model.expert_ensemble is not None and model.expert_ensemble.multi_gpu:
+        print("\n" + "=" * 60)
+        print("MULTI-GPU CONFIGURATION")
+        print("=" * 60)
+        ensemble = model.expert_ensemble
+        
+        if ensemble._experts_loaded['hat']:
+            dev = next(ensemble.hat.parameters()).device
+            mem = sum(p.numel() * p.element_size() for p in ensemble.hat.parameters()) / 1e9
+            print(f"  ✓ HAT:    {dev} ({mem:.2f} GB)")
+        
+        if ensemble._experts_loaded['dat']:
+            dev = next(ensemble.dat.parameters()).device
+            mem = sum(p.numel() * p.element_size() for p in ensemble.dat.parameters()) / 1e9
+            print(f"  ✓ DAT:    {dev} ({mem:.2f} GB)")
+        
+        if ensemble._experts_loaded['nafnet']:
+            dev = next(ensemble.nafnet.parameters()).device
+            mem = sum(p.numel() * p.element_size() for p in ensemble.nafnet.parameters()) / 1e9
+            print(f"  ✓ NAFNet: {dev} ({mem:.2f} GB)")
+        
+        print("=" * 60)
+    
     # ========================================================================
     # CREATE LOSS
     # ========================================================================
@@ -464,17 +849,30 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
     print("Creating Loss Function...")
     print("-" * 40)
     
+    start_epoch = 0  # Default; overwritten if resuming from checkpoint
+    
     loss_config = config['loss']
+    # Initialize with ZERO weights — the stage system from YAML controls everything
     criterion = CombinedLoss(
-        use_l1=loss_config.get('l1', {}).get('enabled', True),
+        l1_weight=0.0,
+        charbonnier_weight=0.0,
+        l2_weight=0.0,
+        vgg_weight=0.0,
+        swt_weight=0.0,
+        fft_weight=0.0,
+        edge_weight=0.0,
+        ssim_weight=0.0,
+        clip_weight=0.0,
         use_swt=loss_config.get('swt', {}).get('enabled', True) and PYWT_AVAILABLE,
         use_fft=loss_config.get('fft', {}).get('enabled', True),
-        use_ssim=loss_config.get('ssim', {}).get('enabled', True),
-        use_vgg=loss_config.get('vgg', {}).get('enabled', False),
-        use_edge=loss_config.get('edge', {}).get('enabled', False),
         use_clip=loss_config.get('clip', {}).get('enabled', False),
     ).to(device)
     
+    # Apply initial stage weights strictly from YAML config
+    _, initial_weights, initial_stage_name = get_loss_stage(start_epoch, config['loss'])
+    criterion.set_weights(initial_weights)
+    print(f"  Initial loss stage: {initial_stage_name}")
+    print(f"  Initial weights: {initial_weights}")
     print(f"  SWT Loss: {'Enabled' if PYWT_AVAILABLE else 'Disabled (PyWavelets not installed)'}")
     
     # ========================================================================
@@ -573,6 +971,10 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
     base_lr = opt_config['lr']
     warmup_lr_val = config['training']['scheduler'].get('warmup_lr', 1e-6)
     
+    # Multi-stage loss scheduler for stage-change announcements
+    from src.training.multi_stage_scheduler import MultiStageLossScheduler
+    loss_scheduler = MultiStageLossScheduler(config['loss']['stages'], current_epoch=start_epoch)
+    
     print("\n" + "=" * 70)
     print("STARTING TRAINING")
     print("=" * 70)
@@ -582,7 +984,66 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
           f"{batch_size * config['training'].get('accumulation_steps', 1)} effective")
     print(f"  Batches per epoch: {len(train_loader)}")
     print(f"  Validate every: {validate_every} epochs")
+    print(f"  Loss stages: {len(config['loss']['stages'])}")
+    for i, s in enumerate(config['loss']['stages']):
+        active = ' ** ACTIVE **' if s['epochs'][0] <= start_epoch < s['epochs'][1] else ''
+        print(f"    Stage {i+1}: [{s['epochs'][0]}-{s['epochs'][1]}) {s['stage_name']}{active}")
     print("=" * 70 + "\n")
+    
+    # ========================================================================
+    # CUDA WARMUP - Run a few forward passes to warmup GPU kernels
+    # ========================================================================
+    if torch.cuda.is_available():
+        print("Warming up CUDA kernels...")
+        
+        # Print GPU memory BEFORE warmup
+        mem_before = torch.cuda.memory_allocated(device) / 1e6
+        print(f"  GPU memory before warmup: {mem_before:.1f} MB")
+        
+        # Verify expert devices (important for multi-GPU) - only in non-cached mode
+        if hasattr(model, 'expert_ensemble') and model.expert_ensemble is not None:
+            ensemble = model.expert_ensemble
+            for name in ['hat', 'dat', 'nafnet']:
+                if ensemble._experts_loaded.get(name):
+                    expert = getattr(ensemble, name)
+                    first_param = next(expert.parameters())
+                    print(f"  Expert {name} on device: {first_param.device}")
+        elif cached_mode:
+            print("  CACHED MODE: No experts to verify (using precomputed features)")
+        
+        model.eval()
+        warmup_input = torch.randn(1, 3, 64, 64, device=device)
+        with torch.no_grad():
+            if cached_mode:
+                # In cached mode, use forward_with_precomputed with mock data
+                print("  Warming up cached mode (no expert inference)...")
+                mock_experts = {'hat': torch.randn(1, 3, 256, 256, device=device),
+                               'dat': torch.randn(1, 3, 256, 256, device=device),
+                               'nafnet': torch.randn(1, 3, 256, 256, device=device)}
+                for i in range(3):
+                    torch.cuda.synchronize()
+                    t0 = time.time()
+                    _ = model.forward_with_precomputed(warmup_input, mock_experts)
+                    torch.cuda.synchronize()
+                    t1 = time.time()
+                    print(f"  Warmup pass {i+1}: {t1-t0:.3f}s (cached mode)")
+            else:
+                for i in range(3):
+                    torch.cuda.synchronize()
+                    t0 = time.time()
+                    _ = model(warmup_input)
+                    torch.cuda.synchronize()
+                    t1 = time.time()
+                    print(f"  Warmup pass {i+1}: {t1-t0:.3f}s")
+        
+        # Print GPU memory AFTER warmup
+        mem_after = torch.cuda.memory_allocated(device) / 1e6
+        print(f"  GPU memory after warmup: {mem_after:.1f} MB")
+        
+        del warmup_input
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        print("  ✓ CUDA warmup complete\n")
     
     for epoch in range(start_epoch, total_epochs):
         epoch_start = time.time()
@@ -594,30 +1055,56 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
         # Get current stage info
         stage_num, loss_weights, stage_name = get_loss_stage(epoch, config['loss'])
         
+        # Stage-change announcement (via MultiStageLossScheduler)
+        stage_changed = loss_scheduler.step(epoch)
+        if stage_changed or epoch == start_epoch:
+            loss_scheduler.print_stage_info()
+        
         print(f"\nEpoch {epoch}/{total_epochs-1} [{stage_name}]")
         print(f"  LR: {get_current_lr(optimizer):.2e}")
         print(f"  Weights: " + ", ".join(f"{k}={v:.2f}" for k, v in loss_weights.items() if v > 0))
         
-        # Train
-        train_metrics = train_epoch(
-            model=model,
-            train_loader=train_loader,
-            criterion=criterion,
-            optimizer=optimizer,
-            device=device,
-            epoch=epoch,
-            config=config,
-            logger=logger,
-            ema=ema
-        )
+        # Train (use cached or standard training function)
+        if cached_mode:
+            train_metrics = train_epoch_cached(
+                model=model,
+                train_loader=train_loader,
+                criterion=criterion,
+                optimizer=optimizer,
+                device=device,
+                epoch=epoch,
+                config=config,
+                logger=logger,
+                ema=ema
+            )
+        else:
+            train_metrics = train_epoch(
+                model=model,
+                train_loader=train_loader,
+                criterion=criterion,
+                optimizer=optimizer,
+                device=device,
+                epoch=epoch,
+                config=config,
+                logger=logger,
+                ema=ema
+            )
         
         # Step scheduler (after warmup)
         if epoch >= warmup_epochs:
             scheduler.step()
         
-        # Validate
+        # ==========================================================
+        # FIXED VALIDATION & SAVING LOGIC
+        # ==========================================================
         val_metrics = None
-        if epoch % validate_every == 0 or epoch == total_epochs - 1:
+        is_best = False
+        
+        # 1. Fetch validate_start from config (default to 0 if missing)
+        validate_start = config['validation'].get('validate_start', 0)
+        
+        # 2. Check if we should validate
+        if (epoch >= validate_start and epoch % validate_every == 0) or epoch == total_epochs - 1:
             log_images = (epoch % log_images_every == 0)
             val_metrics = validate_epoch(
                 model=model,
@@ -627,18 +1114,19 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
                 config=config,
                 logger=logger,
                 log_images=log_images,
-                ema=ema
+                ema=ema,
+                cached_mode=cached_mode
             )
-        
-        # Save checkpoint
-        if checkpoint_manager.should_save(epoch) or epoch == total_epochs - 1:
-            is_best = False
-            if val_metrics is not None:
-                current_psnr = val_metrics['psnr']
-                is_best = checkpoint_manager.is_best(current_psnr)
-                if is_best:
-                    best_psnr = current_psnr
             
+            # 3. IMMEDIATELY check if this is the best model so far
+            current_psnr = val_metrics['psnr']
+            is_best = checkpoint_manager.is_best(current_psnr)
+            if is_best:
+                best_psnr = current_psnr
+                print(f"  ** NEW BEST PSNR: {best_psnr:.2f} dB! **")
+
+        # 4. Save checkpoint: Save if it's a scheduled save OR if it's a new best!
+        if checkpoint_manager.should_save(epoch) or is_best or epoch == total_epochs - 1:
             checkpoint_manager.save_checkpoint(
                 epoch=epoch,
                 model=model,
@@ -648,6 +1136,7 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
                 is_best=is_best,
                 extra_state={'stage': stage_num}
             )
+        # ==========================================================
         
         # Log epoch summary to TensorBoard
         if logger is not None:
@@ -655,13 +1144,27 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
             if val_metrics is not None:
                 logger.log_metrics(val_metrics, epoch, prefix='val')
         
-        # Print summary
+        # Print summary with GPU memory and speed
         epoch_time = time.time() - epoch_start
-        print(f"\nEpoch {epoch} completed in {epoch_time:.1f}s")
+        imgs_per_sec = len(train_loader) * batch_size / epoch_time if epoch_time > 0 else 0
+        print(f"\nEpoch {epoch} completed in {epoch_time:.1f}s ({imgs_per_sec:.1f} imgs/sec)")
         print(f"  Train loss: {train_metrics['loss']:.4f}")
         if val_metrics is not None:
             print(f"  Val PSNR: {val_metrics['psnr']:.2f} dB | SSIM: {val_metrics['ssim']:.4f}")
             print(f"  Best PSNR: {best_psnr:.2f} dB")
+        if torch.cuda.is_available():
+            mem_used = torch.cuda.max_memory_allocated(device) / 1e9
+            mem_total = torch.cuda.get_device_properties(device).total_mem / 1e9
+            print(f"  GPU Memory: {mem_used:.2f}/{mem_total:.1f} GB ({mem_used/mem_total*100:.0f}%)")
+            torch.cuda.reset_peak_memory_stats(device)
+        # ETA estimate
+        epochs_done = epoch - start_epoch + 1
+        epochs_remaining = total_epochs - epoch - 1
+        if epochs_done > 0 and epochs_remaining > 0:
+            avg_epoch_time = (time.time() - epoch_start) if epochs_done == 1 else None
+            eta_sec = epochs_remaining * epoch_time
+            eta_h = eta_sec / 3600
+            print(f"  ETA: {eta_h:.1f}h ({epochs_remaining} epochs remaining)")
         print("-" * 70)
         
         # Clear CUDA cache periodically

@@ -516,7 +516,9 @@ def create_dataloaders(
     lr_patch_size: int = 64,
     scale: int = 4,
     pin_memory: bool = True,
-    repeat_factor: int = 20
+    repeat_factor: int = 20,
+    prefetch_factor: int = 2,
+    persistent_workers: bool = True
 ) -> Tuple[DataLoader, Optional[DataLoader]]:
     """
     Create train and validation dataloaders for pre-generated LR-HR pairs.
@@ -532,6 +534,8 @@ def create_dataloaders(
         scale: Upscaling factor
         pin_memory: Pin memory for faster GPU transfer
         repeat_factor: Repeat dataset for more samples
+        prefetch_factor: Number of batches to prefetch per worker
+        persistent_workers: Keep workers alive between epochs
         
     Returns:
         (train_loader, val_loader)
@@ -559,7 +563,8 @@ def create_dataloaders(
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=True,
-        persistent_workers=num_workers > 0
+        persistent_workers=persistent_workers and num_workers > 0,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None
     )
     
     print(f"\nTrain DataLoader:")

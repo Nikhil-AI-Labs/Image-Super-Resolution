@@ -91,6 +91,19 @@ desktop.ini
 runs/
 
 # ==============================================================================
+# TEMPORARY ANALYSIS & OUTPUT FILES
+# ==============================================================================
+analyze_dat.py
+analyze_dat_simple.py
+dat_analysis.txt
+test_output.txt
+scripts/breakdown.txt
+scripts/param_sweep.txt
+scripts/phase*_results.txt
+scripts/phase*_output.txt
+scripts/phase1_final_results.txt
+
+# ==============================================================================
 # LARGE DATASET FILES (users download separately)
 # ==============================================================================
 # Only ignore actual image files in data, not the directory structure

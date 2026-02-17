@@ -332,7 +332,9 @@ class FrequencyDecomposition(nn.Module):
     
     def decompose(
         self, 
-        x: torch.Tensor
+        x: torch.Tensor,
+        low_split: Optional[float] = None,
+        high_split: Optional[float] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Decompose image into low/mid/high frequency components.
@@ -342,6 +344,11 @@ class FrequencyDecomposition(nn.Module):
         
         Args:
             x: Image tensor of shape [B, C, H, W]
+            low_split: Optional adaptive low frequency ratio (0-1). 
+                       If None, uses self.low_freq_ratio (default 0.25)
+            high_split: Optional adaptive high frequency split point (0-1).
+                        Frequencies above this are high freq.
+                        If None, uses (1 - self.high_freq_ratio) (default 0.75)
             
         Returns:
             Tuple of (low_freq, mid_freq, high_freq), each of shape [B, C, H, W]
@@ -367,11 +374,23 @@ class FrequencyDecomposition(nn.Module):
         # Apply DCT
         dct_blocks = self.dct2d_block(x_blocks)
         
+        # Determine which masks to use: adaptive or fixed
+        if low_split is not None and high_split is not None:
+            # Create ADAPTIVE frequency masks based on learned splits
+            low_mask, mid_mask, high_mask = self._create_adaptive_masks(
+                bs, low_split, high_split, x.device
+            )
+        else:
+            # Use pre-computed fixed masks
+            low_mask = self.low_mask
+            mid_mask = self.mid_mask
+            high_mask = self.high_mask
+        
         # Apply frequency masks
         # Masks are [bs, bs], broadcast to [B, C, num_h, num_w, bs, bs]
-        dct_low = dct_blocks * self.low_mask
-        dct_mid = dct_blocks * self.mid_mask
-        dct_high = dct_blocks * self.high_mask
+        dct_low = dct_blocks * low_mask
+        dct_mid = dct_blocks * mid_mask
+        dct_high = dct_blocks * high_mask
         
         # Apply IDCT to get spatial domain components
         low_blocks = self.idct2d_block(dct_low)
@@ -391,6 +410,68 @@ class FrequencyDecomposition(nn.Module):
         high_freq = blocks_to_image(high_blocks)
         
         return low_freq, mid_freq, high_freq
+    
+    def _create_adaptive_masks(
+        self,
+        block_size: int,
+        low_split: float,
+        high_split: float,
+        device: torch.device
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Create DIFFERENTIABLE adaptive frequency masks using soft sigmoid gates.
+        
+        Instead of hard thresholds (which block gradients), we use soft sigmoid
+        transitions. This allows the frequency band predictor to learn optimal
+        splits through backpropagation.
+        
+        Args:
+            block_size: DCT block size
+            low_split: Ratio for low frequency threshold (e.g., 0.28 = 28%)
+            high_split: Ratio for high frequency threshold (e.g., 0.72 = 72%)
+            device: Target device
+            
+        Returns:
+            Tuple of (low_mask, mid_mask, high_mask) with soft gradients
+        """
+        # Clamp to valid ranges
+        low_split = max(0.15, min(0.40, low_split))   # 15%-40%
+        high_split = max(0.60, min(0.85, high_split))  # 60%-85%
+        
+        # Get zigzag indices and normalize to [0, 1]
+        zigzag_idx = self._zigzag_indices(block_size).float().to(device)
+        total_coeffs = block_size * block_size
+        normalized_idx = zigzag_idx / total_coeffs  # [0, 1] range
+        
+        # =====================================================
+        # SOFT SIGMOID MASKS (Differentiable!)
+        # =====================================================
+        # Instead of hard: mask = (idx < threshold) ? 1 : 0
+        # We use soft: mask = sigmoid((threshold - idx) * sharpness)
+        #
+        # Higher sharpness (50) gives sharper transitions while
+        # still allowing gradients to flow through.
+        # =====================================================
+        
+        sharpness = 50.0  # Controls transition sharpness
+        
+        # Low frequency mask: high values for low frequencies (small idx)
+        # sigmoid((low_split - normalized_idx) * sharpness)
+        # When idx < low_split: output ~= 1
+        # When idx > low_split: output ~= 0
+        low_mask = torch.sigmoid((low_split - normalized_idx) * sharpness)
+        
+        # High frequency mask: high values for high frequencies (large idx)
+        # sigmoid((normalized_idx - high_split) * sharpness)
+        # When idx > high_split: output ~= 1
+        # When idx < high_split: output ~= 0
+        high_mask = torch.sigmoid((normalized_idx - high_split) * sharpness)
+        
+        # Mid frequency mask: what's left after low and high
+        # Clamped to ensure valid range [0, 1]
+        mid_mask = torch.clamp(1.0 - low_mask - high_mask, 0.0, 1.0)
+        
+        return low_mask, mid_mask, high_mask
     
     def reconstruct(
         self,

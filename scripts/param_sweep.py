@@ -1,0 +1,60 @@
+dim=128 ref_ch=128 ref_d=6 heads=8 => TOTAL=3,426,700
+  adaptive_band_predictor: 100
+  collaborative: 901,385
+  cross_band_attn: 67,203
+  dat_feature_proj: 46,336
+  dynamic_selector: 225,924
+  freq_router: 77,469
+  hat_feature_proj: 46,336
+  multi_res_fusion: 1,387,627
+  multiscale: 60,288
+  nafnet_feature_proj: 16,640
+  refine_net: 597,379
+dim=64 ref_ch=64 ref_d=6 heads=8 => TOTAL=985,436
+  adaptive_band_predictor: 100
+  collaborative: 254,089
+  cross_band_attn: 17,219
+  dat_feature_proj: 23,168
+  dynamic_selector: 57,668
+  freq_router: 77,469
+  hat_feature_proj: 23,168
+  multi_res_fusion: 355,131
+  multiscale: 17,856
+  nafnet_feature_proj: 8,320
+  refine_net: 151,235
+dim=64 ref_ch=64 ref_d=4 heads=4 => TOTAL=911,580
+  adaptive_band_predictor: 100
+  collaborative: 254,089
+  cross_band_attn: 17,219
+  dat_feature_proj: 23,168
+  dynamic_selector: 57,668
+  freq_router: 77,469
+  hat_feature_proj: 23,168
+  multi_res_fusion: 355,131
+  multiscale: 17,856
+  nafnet_feature_proj: 8,320
+  refine_net: 77,379
+dim=48 ref_ch=48 ref_d=4 heads=4 => TOTAL=573,152
+  adaptive_band_predictor: 100
+  collaborative: 153,705
+  cross_band_attn: 9,843
+  dat_feature_proj: 17,376
+  dynamic_selector: 32,884
+  freq_router: 77,469
+  hat_feature_proj: 17,376
+  multi_res_fusion: 202,847
+  multiscale: 11,088
+  nafnet_feature_proj: 6,240
+  refine_net: 44,211
+dim=80 ref_ch=80 ref_d=5 heads=8 => TOTAL=1,394,312
+  adaptive_band_predictor: 100
+  collaborative: 379,049
+  cross_band_attn: 26,643
+  dat_feature_proj: 28,960
+  dynamic_selector: 89,364
+  freq_router: 77,469
+  hat_feature_proj: 28,960
+  multi_res_fusion: 549,751
+  multiscale: 26,160
+  nafnet_feature_proj: 10,400
+  refine_net: 177,443

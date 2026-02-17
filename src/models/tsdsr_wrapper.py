@@ -87,10 +87,15 @@ class VAEWrapper(nn.Module):
                         subfolder="vae"
                     ).to(self.device)
                     
+                    # FREEZE VAE - TSD-SR is NOT fine-tuned!
+                    self.vae.eval()
+                    for param in self.vae.parameters():
+                        param.requires_grad = False
+                    
                     # Load custom weights if compatible
                     # Note: May need adjustment for TSD-SR specific VAE
                     self.is_loaded = True
-                    print(f"  ✓ VAE architecture built")
+                    print(f"  ✓ VAE architecture built & frozen")
             else:
                 # Fallback: store state dict for later use
                 self.vae_state = torch.load(str(vae_path), map_location=self.device)

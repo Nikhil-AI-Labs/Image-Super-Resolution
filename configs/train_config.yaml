@@ -1,59 +1,111 @@
 # ============================================================================
-# NTIRE 2025 SR Training Configuration
+# CHAMPIONSHIP SR TRAINING - PHASE 5 SINGLE-GPU CONFIGURATION
 # ============================================================================
-# Championship Training for Frequency Mixer (PSNR Optimization)
+# Hardware: Single P5000 GPU (16GB VRAM)
+# All Phases: Scale + Hierarchical + Multi-Domain + LKA + Edge
+# Target: 35.3-35.5 dB PSNR
+# Parameters: ~1.02M trainable
 # ============================================================================
 
-# Experiment name
-experiment_name: "frequency_mixer_psnr_v1"
-description: "Training frequency mixer with frozen experts for PSNR optimization"
+experiment_name: "championship_sr_phase5_single_gpu"
+description: "Complete Phase 1-4 architecture - Single P5000 - 200 epochs"
 
 # ============================================================================
 # MODEL CONFIGURATION
 # ============================================================================
 model:
-  type: "MultiFusionSR"
+  type: "CompleteEnhancedFusionSR"
   scale: 4
   
-  # Expert models (frozen, pre-trained)
   experts:
     - name: "HAT"
-      weight_path: "pretrained/HAT_SRx4.pth"
+      weight_path: "pretrained/HAT-L_SRx4_ImageNet-pretrain.pth"
       frozen: true
-    - name: "MambaIR"
-      weight_path: "pretrained/MambaIR_SR_x4.pth"
+      architecture:
+        type: "HAT-L"
+        embed_dim: 180
+        depths: [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+        num_heads: [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+        window_size: 16
+        
+    - name: "DAT"
+      weight_path: "pretrained/DAT_x4.pth"
       frozen: true
+      architecture:
+        type: "DAT-S"
+        embed_dim: 180
+        depths: [6, 6, 6, 6, 6, 6]
+        num_heads: [6, 6, 6, 6, 6, 6]
+        split_size: [8, 16]
+        
     - name: "NAFNet"
-      weight_path: "pretrained/NAFNet_x4.pth"
+      weight_path: "pretrained/NAFNet-SIDD-width64.pth"
       frozen: true
+      architecture:
+        type: "NAFNet-SR"
+        width: 64
   
-  # Fusion network configuration
   fusion:
     num_experts: 3
     use_residual: true
     use_multiscale: true
     use_quality_head: true
+    
+    # Hardware-safe dimensions
+    fusion_dim: 64
+    num_heads: 4
+    refine_depth: 4
+    refine_channels: 64
+    
+    # All phases enabled
+    enable_hierarchical: true
+    enable_multi_domain_freq: true
+    enable_lka: true
+    enable_edge_enhance: true
+    
+    # Fusion improvements (ALL ENABLED for maximum PSNR!)
+    improvements:
+      dynamic_expert_selection: true
+      cross_band_attention: true
+      adaptive_frequency_bands: true
+      multi_resolution_fusion: true
+      collaborative_learning: true
 
 # ============================================================================
-# TRAINING CONFIGURATION
+# TSD-SR CONFIGURATION (Phase 7 - Perceptual Refinement)
+# ============================================================================
+tsdsr:
+  enabled: true
+  use_during_training: false
+  student_path: "pretrained/tsdsr/transformer.safetensors"
+  teacher_path: "pretrained/teacher/teacher.safetensors"
+  vae_path: "pretrained/tsdsr/vae.safetensors"
+  inference_steps: 1
+  use_teacher_for_validation: false
+
+# ============================================================================
+# TRAINING CONFIGURATION (SINGLE GPU)
 # ============================================================================
 training:
-  # Epochs and batch size
   total_epochs: 200
-  batch_size: 8  # Reduced for FP32 + large experts (adjust based on GPU)
+  
+  # Single GPU settings (P5000 16GB)
+  batch_size: 24
   num_workers: 4
+  prefetch_factor: 2
+  persistent_workers: true
   pin_memory: true
   
   # Precision and optimization
-  precision: "fp32"  # No mixed precision (HAT attention stability)
+  precision: "fp32"
   use_amp: false
-  gradient_clip: 1.0  # Gradient clipping for stability
-  accumulation_steps: 2  # Effective batch = 8 * 2 = 16
+  gradient_clip: 1.0
+  accumulation_steps: 1
   
-  # Learning rate
+  # Optimizer
   optimizer:
     type: "AdamW"
-    lr: 2.0e-4  # Higher LR with warmup
+    lr: 1.0e-4
     betas: [0.9, 0.999]
     weight_decay: 1.0e-4
     eps: 1.0e-8
@@ -61,55 +113,58 @@ training:
   # Learning rate scheduler
   scheduler:
     type: "CosineAnnealingWarmRestarts"
-    T_0: 50  # First restart at 50 epochs
-    T_mult: 2  # Double period after each restart
-    eta_min: 1.0e-7
-    warmup_epochs: 5  # Linear warmup for first 5 epochs
-    warmup_lr: 1.0e-6
+    T_0: 50
+    T_mult: 2
+    eta_min: 5.0e-8
+    warmup_epochs: 5
+    warmup_lr: 5.0e-7
   
   # EMA for stable inference
   ema:
     enabled: true
-    decay: 0.999
+    decay: 0.9995
 
 # ============================================================================
-# LOSS CONFIGURATION (MULTI-STAGE)
+# LOSS CONFIGURATION (3-STAGE)
 # ============================================================================
 loss:
   # Stage-based loss weights (championship strategy)
   stages:
-    # Stage 1: PSNR-focused initialization (0-100 epochs)
-    - epochs: [0, 100]
-      stage_name: "reconstruction"
+    # Stage 1: Pure L1 reconstruction (0-80 epochs)
+    - epochs: [0, 80]
+      stage_name: "foundation_psnr"
+      description: "Build strong pixel-level reconstruction"
       weights:
         l1: 1.0
         charbonnier: 0.0
         swt: 0.0
-        vgg: 0.0
         fft: 0.0
         ssim: 0.0
-    
-    # Stage 2: Add frequency loss (100-150 epochs)
-    - epochs: [100, 150]
-      stage_name: "frequency_refinement"
-      weights:
-        l1: 0.8
-        charbonnier: 0.0
-        swt: 0.15
         vgg: 0.0
+    
+    # Stage 2: Add frequency losses (80-150 epochs)
+    - epochs: [80, 150]
+      stage_name: "frequency_refinement"
+      description: "Enhance frequency detail with SWT + FFT"
+      weights:
+        l1: 0.75
+        charbonnier: 0.0
+        swt: 0.20
         fft: 0.05
         ssim: 0.0
+        vgg: 0.0
     
     # Stage 3: Detail enhancement (150-200 epochs)
     - epochs: [150, 200]
       stage_name: "detail_enhancement"
+      description: "Final edge and texture refinement"
       weights:
-        l1: 0.6
+        l1: 0.60
         charbonnier: 0.0
         swt: 0.25
-        vgg: 0.0
-        fft: 0.1
+        fft: 0.10
         ssim: 0.05
+        vgg: 0.0
   
   # Loss components configuration
   l1:
@@ -122,133 +177,166 @@ loss:
   swt:
     enabled: true
     levels: 3
-    wavelet: "haar"
-    use_gpu_approximation: false  # Accurate for training
+    wavelet: "db4"
+    use_gpu_approximation: false
   
   fft:
     enabled: true
     loss_type: "l1"
+    log_scale: true
   
   ssim:
     enabled: true
     window_size: 11
+    use_padding: true
   
   vgg:
-    enabled: false  # Optional for perceptual quality
+    enabled: false
     layers: ["relu2_2", "relu3_4", "relu4_4"]
+    weights: [0.5, 0.3, 0.2]
   
   edge:
-    enabled: false  # Optional for edge preservation
+    enabled: false
   
   clip:
-    enabled: false  # Save for final refinement
+    enabled: false
 
 # ============================================================================
 # DATASET CONFIGURATION
 # ============================================================================
 dataset:
-  # Training dataset paths
   train:
-    root: "data/DF2K"
+    root: "dataset/DF2K"
     hr_subdir: "train_HR"
     lr_subdir: "train_LR"
+    cache_data: false
   
-  # Validation dataset paths
   val:
-    root: "data/DF2K"
+    root: "dataset/DF2K"
     hr_subdir: "val_HR"
     lr_subdir: "val_LR"
   
-  # Patch settings
-  lr_patch_size: 64  # LR patch size (HR will be 256 for scale 4)
+  lr_patch_size: 64
   scale: 4
   
-  # Augmentation
   augmentation:
     enabled: true
     use_flip: true
-    use_rotation: true
-    use_color_jitter: true
-    use_cutblur: false
     flip_prob: 0.5
+    use_rotation: true
     rotation_prob: 0.5
-    color_jitter_prob: 0.3
+    rotation_angles: [90, 180, 270]
+    use_color_jitter: true
+    color_jitter_prob: 0.2
+    brightness: 0.05
+    contrast: 0.05
+    saturation: 0.05
+    use_cutblur: false
+    use_mixup: false
+    use_random_crop_scale: true
+    crop_scale_range: [0.9, 1.1]
   
-  # Dataset repetition (more diverse patches per epoch)
   repeat_factor: 20
 
 # ============================================================================
 # VALIDATION CONFIGURATION
 # ============================================================================
 validation:
-  # Validation frequency
-  validate_every: 5  # Validate every N epochs
-  
-  # Metrics to compute
+  validate_every: 5
+  validate_start: 10
   metrics:
     - "psnr"
     - "ssim"
-  
-  # Metric calculation settings (same as official NTIRE evaluation)
-  crop_border: 4  # Crop 4 pixels for scale 4
-  test_y_channel: true  # Calculate on Y channel
-  
-  # Image logging
+    - "lpips"
+  crop_border: 4
+  test_y_channel: true
   log_images: true
   log_images_every: 10
-  num_log_images: 4
+  num_log_images: 8
+  save_best_images: true
+  save_comparison_grid: true
 
 # ============================================================================
 # CHECKPOINT CONFIGURATION
 # ============================================================================
 checkpoint:
-  # Checkpoint directory
-  checkpoint_dir: "checkpoints"
-  
-  # Checkpoint saving
-  save_every: 10  # Save every N epochs
-  keep_best_k: 3  # Keep top 3 best checkpoints
-  keep_last_n: 5  # Keep last 5 regular checkpoints
-  
-  # Best checkpoint criteria
+  checkpoint_dir: "checkpoints/phase5_single_gpu"
+  save_every: 10
+  save_lightweight: true
+  keep_best_k: 5
+  keep_last_n: 10
+  keep_milestone: [50, 100, 150, 200]
   metric: "psnr"
-  mode: "max"  # Higher PSNR is better
-  
-  # Resume training
-  resume: null  # Path to checkpoint (null = start fresh)
+  mode: "max"
+  resume: null
   load_optimizer: true
+  load_scheduler: true
+  load_ema: true
 
 # ============================================================================
 # LOGGING CONFIGURATION
 # ============================================================================
 logging:
-  # TensorBoard
   tensorboard:
     enabled: true
-    log_dir: "logs"
+    log_dir: "logs/phase5_single_gpu"
+    log_scalars_every: 50
+    log_images_every: 500
   
-  # Console logging
-  print_freq: 50  # Print every N iterations
+  wandb:
+    enabled: false
+    project: "championship_sr"
+    entity: null
+    name: "phase5_single_gpu"
   
-  # What to log
+  print_freq: 50
   log_loss_components: true
   log_gradients: false
   log_learning_rate: true
   log_ema_metrics: true
+  log_phase_info: true
+  estimate_remaining_time: true
+  log_gpu_memory: true
+  log_training_speed: true
 
 # ============================================================================
-# HARDWARE CONFIGURATION
+# HARDWARE (SINGLE GPU)
 # ============================================================================
 hardware:
-  # GPU settings
   gpu_ids: [0]
   cudnn_benchmark: true
-  
-  # Memory management
-  empty_cache_every: 100  # Clear CUDA cache periodically
+  cudnn_deterministic: false
+  empty_cache_every: 100
+  max_memory_allocated: null
+  use_ddp: false
+  find_unused_parameters: false
 
 # ============================================================================
 # REPRODUCIBILITY
 # ============================================================================
 seed: 42
-deterministic: false  # Set true for full reproducibility (slower)
+deterministic: false
+
+# ============================================================================
+# MONITORING
+# ============================================================================
+monitoring:
+  track_metrics:
+    - name: "train_loss"
+      mode: "min"
+    - name: "val_psnr"
+      mode: "max"
+    - name: "val_ssim"
+      mode: "max"
+  
+  early_stopping:
+    enabled: false
+    patience: 30
+    min_delta: 0.01
+    metric: "val_psnr"
+  
+  reduce_lr_on_plateau:
+    enabled: false
+    patience: 10
+    factor: 0.5
+    min_lr: 1.0e-7
