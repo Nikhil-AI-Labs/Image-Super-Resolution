@@ -1,14 +1,14 @@
 # ============================================================================
-# CHAMPIONSHIP SR TRAINING - PHASE 5 SINGLE-GPU CONFIGURATION
+# CHAMPIONSHIP SR TRAINING - CHAMPIONSHIP ARCHITECTURE CONFIGURATION
 # ============================================================================
-# Hardware: Single P5000 GPU (16GB VRAM)
-# All Phases: Scale + Hierarchical + Multi-Domain + LKA + Edge
-# Target: 35.3-35.5 dB PSNR
-# Parameters: ~1.02M trainable
+# Hardware: Single GPU (26GB VRAM)
+# Experts: HAT-L, DRCT-L, GRL-B, EDSR-L (4-expert ensemble)
+# Target: 35.5 dB PSNR
+# Parameters: ~1.2M trainable, ~131.7M frozen
 # ============================================================================
 
-experiment_name: "championship_sr_phase5_single_gpu"
-description: "Complete Phase 1-4 architecture - Single P5000 - 200 epochs"
+experiment_name: "championship_sr_phase3_single_gpu"
+description: "Phase 3 - 4-expert fusion (HAT+DRCT+GRL+EDSR) - Single GPU 26GB - 200 epochs"
 
 # ============================================================================
 # MODEL CONFIGURATION
@@ -19,7 +19,7 @@ model:
   
   experts:
     - name: "HAT"
-      weight_path: "pretrained/HAT-L_SRx4_ImageNet-pretrain.pth"
+      weight_path: "pretrained/hat/HAT-L_SRx4_ImageNet-pretrain.pth"
       frozen: true
       architecture:
         type: "HAT-L"
@@ -28,48 +28,52 @@ model:
         num_heads: [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
         window_size: 16
         
-    - name: "DAT"
-      weight_path: "pretrained/DAT_x4.pth"
+    - name: "DRCT"
+      weight_path: "pretrained/drct/DRCT-L_X4.pth"
       frozen: true
       architecture:
-        type: "DAT-S"
+        type: "DRCT-L"
         embed_dim: 180
-        depths: [6, 6, 6, 6, 6, 6]
-        num_heads: [6, 6, 6, 6, 6, 6]
-        split_size: [8, 16]
+        depths: [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+        num_heads: [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+        window_size: 16
         
-    - name: "NAFNet"
-      weight_path: "pretrained/NAFNet-SIDD-width64.pth"
+    - name: "GRL"
+      weight_path: "pretrained/grl/GRL-B_SR_x4.pth"
       frozen: true
       architecture:
-        type: "NAFNet-SR"
-        width: 64
+        type: "GRL-B"
+        embed_dim: 180
+        depths: [4, 4, 8, 8, 4, 4]
+        num_heads: [6, 6, 6, 6, 6, 6]
+        window_size: 8
+        
+    - name: "EDSR"
+      weight_path: "pretrained/edsr/EDSR_Lx4_f256b32_DIV2K_official-76ee1c8f.pth"
+      frozen: true
+      architecture:
+        type: "EDSR-L"
+        num_feat: 256
+        num_block: 32
   
   fusion:
-    num_experts: 3
+    num_experts: 4
+    fusion_dim: 128             # Collaborative learning dimension
+    refine_channels: 128        # Refinement network channels
+    refine_depth: 6             # Refinement network depth
+    base_channels: 64           # Hierarchical fusion base channels
     use_residual: true
     use_multiscale: true
     use_quality_head: true
     
-    # Hardware-safe dimensions
-    fusion_dim: 64
-    num_heads: 4
-    refine_depth: 4
-    refine_channels: 64
-    
-    # All phases enabled
-    enable_hierarchical: true
-    enable_multi_domain_freq: true
-    enable_lka: true
-    enable_edge_enhance: true
-    
-    # Fusion improvements (ALL ENABLED for maximum PSNR!)
+    # Championship improvements (ALL ENABLED)
     improvements:
-      dynamic_expert_selection: true
-      cross_band_attention: true
-      adaptive_frequency_bands: true
-      multi_resolution_fusion: true
-      collaborative_learning: true
+      dynamic_expert_selection: true    # Phase 6: per-pixel difficulty gating
+      cross_band_attention: true        # Phase 3: LKA k=21 cross-band (9 bands)
+      adaptive_frequency_bands: true    # Phase 2: DCT+DWT+FFT decomposition
+      multi_resolution_fusion: true     # Phase 5: hierarchical 64→128→256
+      collaborative_learning: true      # Phase 4: LKA cross-expert attention
+      edge_enhancement: true            # Phase 7b: Laplacian pyramid refinement
 
 # ============================================================================
 # TSD-SR CONFIGURATION (Phase 7 - Perceptual Refinement)
@@ -84,21 +88,21 @@ tsdsr:
   use_teacher_for_validation: false
 
 # ============================================================================
-# TRAINING CONFIGURATION (SINGLE GPU)
+# TRAINING CONFIGURATION (SINGLE GPU - 26GB)
 # ============================================================================
 training:
   total_epochs: 200
   
-  # Single GPU settings (P5000 16GB)
-  batch_size: 24
+  # Single GPU settings (26GB VRAM)
+  batch_size: 32
   num_workers: 4
   prefetch_factor: 2
   persistent_workers: true
   pin_memory: true
   
   # Precision and optimization
-  precision: "fp32"
-  use_amp: false
+  precision: "fp16"
+  use_amp: true
   gradient_clip: 1.0
   accumulation_steps: 1
   
@@ -260,7 +264,7 @@ validation:
 # CHECKPOINT CONFIGURATION
 # ============================================================================
 checkpoint:
-  checkpoint_dir: "checkpoints/phase5_single_gpu"
+  checkpoint_dir: "checkpoints/phase3_single_gpu"
   save_every: 10
   save_lightweight: true
   keep_best_k: 5
@@ -279,7 +283,7 @@ checkpoint:
 logging:
   tensorboard:
     enabled: true
-    log_dir: "logs/phase5_single_gpu"
+    log_dir: "logs/phase3_single_gpu"
     log_scalars_every: 50
     log_images_every: 500
   
@@ -287,7 +291,7 @@ logging:
     enabled: false
     project: "championship_sr"
     entity: null
-    name: "phase5_single_gpu"
+    name: "phase3_single_gpu"
   
   print_freq: 50
   log_loss_components: true

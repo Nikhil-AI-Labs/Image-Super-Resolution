@@ -263,7 +263,7 @@ def train_epoch_cached(
     Train for one epoch using CACHED expert features.
     
     This is 10-20x faster than standard training because expert models
-    (HAT, DAT, NAFNet) are NOT run - their outputs are loaded from disk.
+    (HAT, DRCT, GRL, EDSR) are NOT run - their outputs are loaded from disk.
     
     The cached dataset provides:
     - expert_imgs: Dict with pre-computed SR outputs
@@ -535,7 +535,7 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
     # Imports
     from src.data import create_dataloaders
     from src.models.fusion_network import FrequencyAwareFusion
-    from src.models.enhanced_fusion import CompleteEnhancedFusionSR
+    from src.models.enhanced_fusion_v2 import CompleteEnhancedFusionSR
     from src.losses import CombinedLoss, PYWT_AVAILABLE
     from src.utils import CheckpointManager, TensorBoardLogger, EMAModel
     
@@ -672,74 +672,48 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
     # In CACHED MODE: Don't load experts - use precomputed features instead
     if cached_mode:
         print("\n  *** CACHED MODE: Skipping expert model loading ***")
-        print("  Experts (HAT, DAT, NAFNet) are NOT needed in cached mode!")
-        print("  This saves ~50M parameters and significant GPU memory.\n")
+        print("  Experts (HAT, DRCT, GRL, EDSR) are NOT needed in cached mode!")
+        print("  This saves ~131M parameters and significant GPU memory.\n")
         
         # Get improvement settings from config
         improvements = fusion_config.get('improvements', {})
         
         # Create CompleteEnhancedFusionSR with NO experts (expert_ensemble=None)
-        # Phase 1: Pass scaled dimensions from config
         model = CompleteEnhancedFusionSR(
             expert_ensemble=None,  # CACHED MODE: no live experts!
-            num_experts=3,
+            num_experts=fusion_config.get('num_experts', 4),
+            fusion_dim=fusion_config.get('fusion_dim', 128),
+            refine_channels=fusion_config.get('refine_channels', 128),
+            refine_depth=fusion_config.get('refine_depth', 6),
+            base_channels=fusion_config.get('base_channels', 64),
+            block_size=fusion_config.get('block_size', 8),
             upscale=config['dataset'].get('scale', 4),
-            # Phase 1: Scaled dimensions
-            fusion_dim=fusion_config.get('fusion_dim', 64),
-            num_heads=fusion_config.get('num_heads', 4),
-            refine_depth=fusion_config.get('refine_depth', 4),
-            refine_channels=fusion_config.get('refine_channels', 64),
-            enable_hierarchical=fusion_config.get('enable_hierarchical', True),
-            # Phase 2: Multi-domain frequency
-            enable_multi_domain_freq=fusion_config.get('enable_multi_domain_freq', False),
-            # Phase 3: Large Kernel Attention
-            enable_lka=fusion_config.get('enable_lka', False),
-            # Phase 4: Edge enhancement
-            enable_edge_enhance=fusion_config.get('enable_edge_enhance', False),
             # Improvement toggles
             enable_dynamic_selection=improvements.get('dynamic_expert_selection', True),
             enable_cross_band_attn=improvements.get('cross_band_attention', True),
             enable_adaptive_bands=improvements.get('adaptive_frequency_bands', True),
             enable_multi_resolution=improvements.get('multi_resolution_fusion', True),
             enable_collaborative=improvements.get('collaborative_learning', True),
+            enable_edge_enhance=improvements.get('edge_enhancement', True),
         ).to(device)
         
-        target_params = 900_000
         actual_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"  Phase 1 Scale-Up: {actual_params:,} params (target: ~{target_params:,})")
-        
         print(f"  Model: CompleteEnhancedFusionSR (CACHED MODE)")
-        print(f"  Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+        print(f"  Trainable parameters: {actual_params:,}")
         print(f"  Expert parameters: 0 (precomputed)")
         
-    elif model_config.get('type') == 'MultiFusionSR' and 'experts' in model_config:
-        # Load expert models
+    elif model_config.get('type') == 'CompleteEnhancedFusionSR' and 'experts' in model_config:
+        # Load expert models (single GPU)
         from src.models import expert_loader
         
-        print("  Loading expert models (frozen)...")
+        print("  Loading 4 expert models (frozen)...")
         expert_configs = model_config['experts']
         expert_weights = {e['name'].lower(): e.get('weight_path') for e in expert_configs if e.get('weight_path')}
         
-        # Multi-GPU configuration: distribute experts across available GPUs
-        gpu_ids = config['hardware'].get('gpu_ids', [0])
-        expert_devices = None
-        
-        if len(gpu_ids) >= 2 and torch.cuda.device_count() >= 2:
-            # Distribute experts: HAT on GPU 0, DAT+NAFNet on GPU 1
-            expert_devices = {
-                'hat': f'cuda:{gpu_ids[0]}',
-                'dat': f'cuda:{gpu_ids[1]}',
-                'nafnet': f'cuda:{gpu_ids[1]}'
-            }
-            print(f"  [Multi-GPU] Enabling parallel execution:")
-            print(f"    GPU {gpu_ids[0]}: HAT (largest expert)")
-            print(f"    GPU {gpu_ids[1]}: DAT + NAFNet (parallel)")
-        
-        # Create ExpertEnsemble with multi-GPU support
+        # Create ExpertEnsemble — single GPU
         ensemble = expert_loader.ExpertEnsemble(
             upscale=config['dataset'].get('scale', 4),
             device=device,
-            devices=expert_devices
         )
         load_results = ensemble.load_all_experts(
             checkpoint_paths=expert_weights,
@@ -756,42 +730,27 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
         # Get improvement settings from config
         improvements = fusion_config.get('improvements', {})
         
-        # Create CompleteEnhancedFusionSR with ALL improvements enabled!
-        # Phase 1: Scaled dimensions + hierarchical fusion
+        # Create CompleteEnhancedFusionSR with 4 experts
         model = CompleteEnhancedFusionSR(
             expert_ensemble=ensemble,
-            num_experts=fusion_config.get('num_experts', 3),
-            num_bands=3,
+            num_experts=fusion_config.get('num_experts', 4),
+            fusion_dim=fusion_config.get('fusion_dim', 128),
+            refine_channels=fusion_config.get('refine_channels', 128),
+            refine_depth=fusion_config.get('refine_depth', 6),
+            base_channels=fusion_config.get('base_channels', 64),
             block_size=fusion_config.get('block_size', 8),
             upscale=config['dataset'].get('scale', 4),
-            # Phase 1: Scaled dimensions
-            fusion_dim=fusion_config.get('fusion_dim', 64),
-            num_heads=fusion_config.get('num_heads', 4),
-            refine_depth=fusion_config.get('refine_depth', 4),
-            refine_channels=fusion_config.get('refine_channels', 64),
-            enable_hierarchical=fusion_config.get('enable_hierarchical', True),
-            # Phase 2: Multi-domain frequency
-            enable_multi_domain_freq=fusion_config.get('enable_multi_domain_freq', False),
-            # Phase 3: Large Kernel Attention
-            enable_lka=fusion_config.get('enable_lka', False),
-            # Phase 4: Edge enhancement
-            enable_edge_enhance=fusion_config.get('enable_edge_enhance', False),
             # Improvement toggles from config
             enable_dynamic_selection=improvements.get('dynamic_expert_selection', True),
             enable_cross_band_attn=improvements.get('cross_band_attention', True),
             enable_adaptive_bands=improvements.get('adaptive_frequency_bands', True),
             enable_multi_resolution=improvements.get('multi_resolution_fusion', True),
             enable_collaborative=improvements.get('collaborative_learning', True),
-        )
+            enable_edge_enhance=improvements.get('edge_enhancement', True),
+        ).to(device)
         
-        # Move ONLY trainable fusion components to the primary device
-        # DO NOT call model.to(device) - it would override expert device assignments!
-        # Instead, move each trainable submodule individually
-        for name, module in model.named_children():
-            if name != 'expert_ensemble':  # Skip experts - they have their own devices
-                module.to(device)
-        
-        print(f"  Created CompleteEnhancedFusionSR with {len([k for k, v in load_results.items() if v])} loaded experts")
+        loaded_count = len([k for k, v in load_results.items() if v])
+        print(f"  Created CompleteEnhancedFusionSR with {loaded_count} loaded experts")
         print(f"  Improvements enabled:")
         print(f"    • Dynamic Expert Selection: {improvements.get('dynamic_expert_selection', True)}")
         print(f"    • Cross-Band Attention: {improvements.get('cross_band_attention', True)}")
@@ -818,28 +777,19 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
     print(f"  Trainable parameters: {trainable_params:,}")
     print(f"  Total parameters: {total_params:,}")
     
-    # Multi-GPU verification
-    if hasattr(model, 'expert_ensemble') and model.expert_ensemble is not None and model.expert_ensemble.multi_gpu:
+    # Expert ensemble summary
+    if hasattr(model, 'expert_ensemble') and model.expert_ensemble is not None:
         print("\n" + "=" * 60)
-        print("MULTI-GPU CONFIGURATION")
+        print("EXPERT ENSEMBLE (Single GPU)")
         print("=" * 60)
         ensemble = model.expert_ensemble
-        
-        if ensemble._experts_loaded['hat']:
-            dev = next(ensemble.hat.parameters()).device
-            mem = sum(p.numel() * p.element_size() for p in ensemble.hat.parameters()) / 1e9
-            print(f"  ✓ HAT:    {dev} ({mem:.2f} GB)")
-        
-        if ensemble._experts_loaded['dat']:
-            dev = next(ensemble.dat.parameters()).device
-            mem = sum(p.numel() * p.element_size() for p in ensemble.dat.parameters()) / 1e9
-            print(f"  ✓ DAT:    {dev} ({mem:.2f} GB)")
-        
-        if ensemble._experts_loaded['nafnet']:
-            dev = next(ensemble.nafnet.parameters()).device
-            mem = sum(p.numel() * p.element_size() for p in ensemble.nafnet.parameters()) / 1e9
-            print(f"  ✓ NAFNet: {dev} ({mem:.2f} GB)")
-        
+        for name in ['hat', 'drct', 'grl', 'edsr']:
+            if ensemble._experts_loaded.get(name, False):
+                expert_model = getattr(ensemble, name, None)
+                if expert_model is not None:
+                    dev = next(expert_model.parameters()).device
+                    mem = sum(p.numel() * p.element_size() for p in expert_model.parameters()) / 1e9
+                    print(f"  ✓ {name.upper():6s}: {dev} ({mem:.2f} GB)")
         print("=" * 60)
     
     # ========================================================================
@@ -1003,7 +953,7 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
         # Verify expert devices (important for multi-GPU) - only in non-cached mode
         if hasattr(model, 'expert_ensemble') and model.expert_ensemble is not None:
             ensemble = model.expert_ensemble
-            for name in ['hat', 'dat', 'nafnet']:
+            for name in ['hat', 'drct', 'grl', 'edsr']:
                 if ensemble._experts_loaded.get(name):
                     expert = getattr(ensemble, name)
                     first_param = next(expert.parameters())
@@ -1018,12 +968,17 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
                 # In cached mode, use forward_with_precomputed with mock data
                 print("  Warming up cached mode (no expert inference)...")
                 mock_experts = {'hat': torch.randn(1, 3, 256, 256, device=device),
-                               'dat': torch.randn(1, 3, 256, 256, device=device),
-                               'nafnet': torch.randn(1, 3, 256, 256, device=device)}
+                               'drct': torch.randn(1, 3, 256, 256, device=device),
+                               'grl': torch.randn(1, 3, 256, 256, device=device),
+                               'edsr': torch.randn(1, 3, 256, 256, device=device)}
+                mock_feats = {'hat': torch.randn(1, 180, 64, 64, device=device),
+                              'drct': torch.randn(1, 180, 64, 64, device=device),
+                              'grl': torch.randn(1, 180, 64, 64, device=device),
+                              'edsr': torch.randn(1, 256, 64, 64, device=device)}
                 for i in range(3):
                     torch.cuda.synchronize()
                     t0 = time.time()
-                    _ = model.forward_with_precomputed(warmup_input, mock_experts)
+                    _ = model.forward_with_precomputed(warmup_input, mock_experts, mock_feats)
                     torch.cuda.synchronize()
                     t1 = time.time()
                     print(f"  Warmup pass {i+1}: {t1-t0:.3f}s (cached mode)")

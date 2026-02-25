@@ -271,7 +271,7 @@ class EnhancedCollaborativeWithLKA(nn.Module):
     
     def __init__(
         self,
-        num_experts: int = 3,
+        num_experts: int = 4,
         feature_dim: int = 128,
         num_heads: int = 8,
         lka_kernel: int = 21,
@@ -282,10 +282,12 @@ class EnhancedCollaborativeWithLKA(nn.Module):
         self.feature_dim = feature_dim
         
         # Feature alignment (raw expert channels → common dim)
+        # Phase 3 update: 4-expert roster (hook capture channels)
         self.align_layers = nn.ModuleDict({
-            'hat': nn.Conv2d(180, feature_dim, 1),
-            'dat': nn.Conv2d(180, feature_dim, 1),
-            'nafnet': nn.Conv2d(64, feature_dim, 1),
+            'hat':  nn.Conv2d(180, feature_dim, 1),   # HAT-L  conv_after_body → 180ch
+            'drct': nn.Conv2d(180, feature_dim, 1),   # DRCT-L conv_after_body → 180ch
+            'grl':  nn.Conv2d(180, feature_dim, 1),   # GRL-B  conv_after_body → 180ch
+            'edsr': nn.Conv2d(256, feature_dim, 1),   # EDSR-L body → 256ch
         })
         
         # Cross-expert attention
@@ -327,12 +329,13 @@ class EnhancedCollaborativeWithLKA(nn.Module):
         """
         Args:
             expert_features: Dict with intermediate features
-                {'hat': [B, 180, H, W], 'dat': [B, 180, H, W], 'nafnet': [B, 64, H, W]}
+                {'hat': [B, 180, H, W], 'drct': [B, 180, H, W],
+                 'grl': [B, 180, H, W], 'edsr': [B, 256, H, W]}
             expert_outputs: List of SR outputs [B, 3, H_hr, W_hr]
         Returns:
             enhanced_outputs: List of enhanced SR outputs
         """
-        expert_names = ['hat', 'dat', 'nafnet'][:self.num_experts]
+        expert_names = ['hat', 'drct', 'grl', 'edsr'][:self.num_experts]
         
         # Step 1: Align features
         aligned = {}

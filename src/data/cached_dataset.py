@@ -9,7 +9,7 @@ This dataset is designed to work with features extracted by:
 Expected file format:
     {cache_dir}/
     ├── img_001_hat_part.pt   - Contains HAT SR output + features + LR/HR
-    ├── img_001_rest_part.pt  - Contains DAT + NAFNet SR outputs + features
+    ├── img_001_rest_part.pt  - Contains DRCT + GRL + EDSR SR outputs + features
     ├── img_002_hat_part.pt
     ├── img_002_rest_part.pt
     └── ...
@@ -176,7 +176,7 @@ class CachedSRDataset(Dataset):
         hr: torch.Tensor,
         expert_imgs: Dict[str, torch.Tensor],
         expert_feats: Optional[Dict[str, torch.Tensor]]
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor], Optional[Dict[str, torch.Tensor]]]:
         """
         Apply geometric augmentations consistently to all tensors.
         
@@ -310,17 +310,19 @@ def test_cached_dataset():
             }
             torch.save(hat_data, temp_dir / f"{filename}_hat_part.pt")
             
-            # Mock rest part
+            # Mock rest part — Phase 3: DRCT + GRL + EDSR
             rest_data = {
                 'outputs': {
-                    'dat': torch.randn(1, 3, 256, 256),
-                    'nafnet': torch.randn(1, 3, 256, 256)
+                    'drct': torch.randn(1, 3, 256, 256),
+                    'grl':  torch.randn(1, 3, 256, 256),
+                    'edsr': torch.randn(1, 3, 256, 256),
                 },
                 'features': {
-                    'dat': torch.randn(1, 180, 64, 64),
-                    'nafnet': torch.randn(1, 64, 64, 64)
+                    'drct': torch.randn(1, 180, 64, 64),
+                    'grl':  torch.randn(1, 180, 64, 64),
+                    'edsr': torch.randn(1, 256, 64, 64),   # EDSR uses 256 channels
                 },
-                'filename': filename
+                'filename': filename,
             }
             torch.save(rest_data, temp_dir / f"{filename}_rest_part.pt")
         
@@ -345,9 +347,14 @@ def test_cached_dataset():
         
         assert sample['lr'].shape == (3, 64, 64)
         assert sample['hr'].shape == (3, 256, 256)
-        assert 'hat' in sample['expert_imgs']
-        assert 'dat' in sample['expert_imgs']
-        assert 'nafnet' in sample['expert_imgs']
+        assert 'hat'  in sample['expert_imgs']
+        assert 'drct' in sample['expert_imgs']
+        assert 'grl'  in sample['expert_imgs']
+        assert 'edsr' in sample['expert_imgs']
+        assert sample['expert_imgs']['hat'].shape  == (3, 256, 256)
+        assert sample['expert_imgs']['edsr'].shape == (3, 256, 256)
+        assert sample['expert_feats']['hat'].shape  == (180, 64, 64)
+        assert sample['expert_feats']['edsr'].shape == (256, 64, 64)  # 256 channels for EDSR
         print("  [PASSED]\n")
         
         # Test 2: Repeat factor
@@ -395,7 +402,7 @@ def test_cached_dataset():
         print("  [PASSED]\n")
         
         print("=" * 70)
-        print("✓ ALL CACHED DATASET TESTS PASSED!")
+        print("[OK] ALL CACHED DATASET TESTS PASSED!")
         print("=" * 70 + "\n")
         
     finally:

@@ -4,9 +4,10 @@ Models Module
 Provides expert models, fusion network, and TSD-SR for NTIRE 2025 SR.
 
 Expert Models (Frozen):
-- HAT: Hybrid Attention Transformer (Samsung 1st Track A)
-- DAT: Dual Aggregation Transformer (ICCV 2023)
-- NAFNet: Nonlinear Activation Free Network (Samsung)
+- HAT-L:  Hybrid Attention Transformer (Samsung NTIRE winner)
+- DRCT-L: Dense Residual Connected Transformer
+- GRL-B:  Global/Regional/Local attention (CVPR 2023)
+- EDSR-L: Enhanced Deep Residual (pure-conv baseline)
 
 Fusion Network (Trainable):
 - FrequencyRouter: Lightweight CNN for expert routing based on frequency
@@ -47,7 +48,7 @@ from .enhanced_fusion import (
     CompleteEnhancedFusionSR,
     create_complete_enhanced_fusion,
 )
-# V2 - Complete correct implementation with all 5 improvements
+# V2 - Phase 3 implementation with 4 experts
 from .enhanced_fusion_v2 import (
     AdaptiveFrequencyDecomposition,
     CrossBandAttention as CrossBandAttentionV2,
@@ -55,7 +56,6 @@ from .enhanced_fusion_v2 import (
     MultiResolutionFusion as MultiResolutionFusionV2,
     DynamicExpertSelector as DynamicExpertSelectorV2,
     CompleteEnhancedFusionSR as EnhancedFusionV2,
-    ExpertFeatureExtractor,
     create_enhanced_fusion,
 )
 from .tsdsr_wrapper import (
@@ -102,7 +102,7 @@ __all__ = [
     'CollaborativeFeatureLearningV2',
     'MultiResolutionFusionV2',
     'DynamicExpertSelectorV2',
-    'ExpertFeatureExtractor',
+
     
     # Attention Modules
     'ChannelAttention',

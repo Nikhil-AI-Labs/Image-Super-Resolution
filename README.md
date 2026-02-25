@@ -1,1016 +1,894 @@
-# 🏆 Championship SR — NTIRE 2025 Image Super-Resolution
+<div align="center">
 
-[![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+# 🏆 Championship Super-Resolution
 
-> **A 7-phase, multi-expert super-resolution pipeline combining frozen expert ensembles, multi-domain frequency decomposition, hierarchical fusion, and diffusion refinement — engineered for championship-level PSNR on the NTIRE 2025 Challenge.**
+### Multi-Expert Fusion Architecture for NTIRE 2026
 
----
+[![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://python.org)
+[![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0%2B-red.svg)](https://pytorch.org)
+[![CUDA 11.8+](https://img.shields.io/badge/CUDA-11.8%2B-green.svg)](https://developer.nvidia.com/cuda-toolkit)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## 📋 Table of Contents
+**4× Single-Image Super-Resolution** via frozen expert ensembles, frequency-domain analysis, and adaptive fusion
 
-- [Overview](#-overview)
-- [Key Innovations](#-key-innovations)
-- [Architecture — The 7-Phase Pipeline](#-architecture--the-7-phase-pipeline)
-  - [Phase 1 — Expert Processing](#phase-1-expert-processing-frozen)
-  - [Phase 2 — Multi-Domain Frequency Decomposition](#phase-2-multi-domain-frequency-decomposition)
-  - [Phase 3 — Cross-Band Attention + LKA](#phase-3-enhanced-cross-band-attention--lka)
-  - [Phase 4 — Collaborative Feature Learning + LKA](#phase-4-enhanced-collaborative-learning--lka)
-  - [Phase 5 — Hierarchical Multi-Resolution Fusion](#phase-5-hierarchical-multi-resolution-fusion)
-  - [Phase 6 — Dynamic Expert Selection](#phase-6-dynamic-expert-selection)
-  - [Phase 7 — Refinement + Edge Enhancement](#phase-7-multi-level-refinement--edge-enhancement)
-- [Loss Functions](#-loss-functions)
-- [Installation](#-installation)
-- [Quick Start](#-quick-start)
-- [Training](#-training)
-- [Evaluation](#-evaluation)
-- [Project Structure](#-project-structure)
-- [Model Details](#-model-details)
-- [Results](#-results)
-- [Configuration Reference](#-configuration-reference)
-- [Troubleshooting](#-troubleshooting)
-- [Citation](#-citation)
-- [License](#-license)
-- [Acknowledgments](#-acknowledgments)
+*~1.2M trainable parameters · ~131.7M frozen expert parameters · 7-phase pipeline*
+
+</div>
 
 ---
 
-## 🎯 Overview
+## Table of Contents
 
-This repository implements a **state-of-the-art 4× single-image super-resolution (SISR) system** developed for the [NTIRE 2025 Image Super-Resolution Challenge](https://codalab.lisn.upsaclay.fr/).
-
-The system supports **two competition tracks**:
-
-| Track | Objective | Primary Metric | Strategy |
-|-------|-----------|----------------|----------|
-| **Track A** | Restoration Quality | PSNR (dB) | Multi-Expert Fusion (Phases 1–7) |
-| **Track B** | Perceptual Quality | LPIPS, CLIP-IQA, MANIQA, MUSIQ, NIQE | + TSD-SR Diffusion Refinement |
-
-**Target**: 35.5 dB PSNR on DF2K validation with ~900K trainable parameters (experts frozen at ~120M).
+- [Overview](#overview)
+- [Key Innovations](#key-innovations)
+- [Architecture](#architecture)
+  - [Phase 1: Expert Processing](#phase-1-expert-processing-frozen)
+  - [Phase 2: Multi-Domain Frequency Decomposition](#phase-2-multi-domain-frequency-decomposition)
+  - [Phase 3: Cross-Band Attention + LKA](#phase-3-cross-band-attention--lka)
+  - [Phase 4: Collaborative Feature Learning + LKA](#phase-4-collaborative-feature-learning--lka)
+  - [Phase 5: Hierarchical Multi-Resolution Fusion](#phase-5-hierarchical-multi-resolution-fusion)
+  - [Phase 6: Dynamic Expert Selection](#phase-6-dynamic-expert-selection)
+  - [Phase 7: Multi-Level Refinement + Edge Enhancement](#phase-7-multi-level-refinement--edge-enhancement)
+  - [Track B: TSD-SR Diffusion Refinement](#track-b-tsd-sr-diffusion-refinement)
+- [Project Structure](#project-structure)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Training](#training)
+  - [Standard Training](#standard-training)
+  - [Cached Training (10-20× Faster)](#cached-training-10-20-faster)
+  - [Multi-Stage Loss Scheduling](#multi-stage-loss-scheduling)
+  - [Training Configuration](#training-configuration)
+- [Inference](#inference)
+- [Loss Functions](#loss-functions)
+- [Data Pipeline](#data-pipeline)
+- [Evaluation Metrics](#evaluation-metrics)
+- [Model Details](#model-details)
+- [Configuration Reference](#configuration-reference)
+- [Troubleshooting](#troubleshooting)
+- [Citation](#citation)
+- [Acknowledgments](#acknowledgments)
 
 ---
 
-## ✨ Key Innovations
+## Overview
 
-| Innovation | PSNR Gain | Description |
-|------------|-----------|-------------|
-| **Multi-Expert Ensemble** | Baseline | 3 frozen experts (HAT + DAT/MambaIR + NAFNet) covering complementary frequency ranges |
-| **Multi-Domain Frequency Decomposition** | +0.15 dB | 9-band decomposition via DCT (3) + DWT (4) + FFT (2) for rich frequency representation |
-| **Cross-Band Attention + LKA** | +0.2 dB | Multi-head attention across frequency bands with Large Kernel Attention for global context |
-| **Collaborative Feature Learning** | +0.2 dB | Cross-expert attention on intermediate features enabling knowledge sharing between experts |
-| **Hierarchical Multi-Resolution Fusion** | +0.25 dB | Progressive 64→128→256 fusion capturing structure, texture, and detail at multiple scales |
-| **Dynamic Expert Selection** | +0.3 dB | Pixel-difficulty-aware gating that routes 1–3 experts per pixel for efficiency and quality |
-| **Laplacian Edge Enhancement** | +0.1 dB | Multi-scale Laplacian pyramid edge sharpening for crisp boundaries |
-| **TSD-SR Diffusion** | Perceptual | One-step distilled diffusion for Track B perceptual quality |
-| **Cached Training Mode** | 10–20× speedup | Pre-computed expert outputs loaded from disk, skipping frozen experts during training |
+Championship SR is a **7-phase super-resolution pipeline** designed for the NTIRE 2026 Image Super-Resolution Challenge. The core idea is to leverage four powerful pre-trained (frozen) expert SR models and train a lightweight fusion network (~1.2M parameters) that intelligently combines their outputs using frequency-domain analysis, attention mechanisms, and adaptive gating.
+
+### Design Philosophy
+
+Instead of training a single massive model from scratch, we:
+
+1. **Freeze** four state-of-the-art SR models (HAT-L, DRCT-L, GRL-B, EDSR-L) totaling ~131.7M parameters
+2. **Train** a lightweight fusion network that learns *when* and *how* to combine each expert's output
+3. **Guide** the fusion using multi-domain frequency decomposition (DCT + DWT + FFT)
+4. **Adapt** per-pixel expert selection based on local image difficulty
+
+This approach delivers state-of-the-art results with minimal training cost, since only the fusion network's ~1.2M parameters require gradient computation.
 
 ---
 
-## 🏗️ Architecture — The 7-Phase Pipeline
+## Key Innovations
+
+| Innovation | Module | Expected Gain |
+|---|---|---|
+| **4-Expert Frozen Ensemble** | `expert_loader.py` | Baseline |
+| **Multi-Domain Frequency Decomposition** (DCT+DWT+FFT → 9 bands) | `multi_domain_frequency.py` | +0.15 dB |
+| **Cross-Band Attention + LKA** (k=21, 9 bands) | `large_kernel_attention.py` | +0.20 dB |
+| **Collaborative Feature Learning + LKA** (cross-expert attention) | `enhanced_fusion_v2.py` | +0.20 dB |
+| **Hierarchical Multi-Resolution Fusion** (64→128→256) | `hierarchical_fusion.py` | +0.25 dB |
+| **Dynamic Expert Selection** (per-pixel difficulty gating) | `enhanced_fusion_v2.py` | +0.30 dB |
+| **Laplacian Pyramid Edge Enhancement** | `edge_enhancement.py` | +0.10 dB |
+| **3-Stage Loss Scheduling** (L1 → SWT+FFT → SSIM) | `perceptual_loss.py` | — |
+| **Cached Training Pipeline** (10-20× speedup) | `cached_dataset.py` | — |
+
+---
+
+## Architecture
+
+The complete pipeline is implemented in `src/models/complete_sr_pipeline.py` (`CompleteSRPipeline`) which wraps the core fusion model `CompleteEnhancedFusionSR` from `src/models/enhanced_fusion_v2.py`.
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        CHAMPIONSHIP SR ARCHITECTURE                        │
-│                     7-Phase Pipeline · Target: 35.5 dB                     │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  LR Image [B, 3, H, W]                                                    │
-│       │                                                                     │
-│  ═══ PHASE 1: Expert Processing (Frozen) ════════════════════════════════  │
-│       ├──→ HAT-L  (40.8M params)  →  SR₁ [B, 3, 4H, 4W]  + features₁    │
-│       ├──→ DAT    (26.0M params)  →  SR₂ [B, 3, 4H, 4W]  + features₂    │
-│       └──→ NAFNet (67.9M params)  →  SR₃ [B, 3, 4H, 4W]  + features₃    │
-│                                                                             │
-│  ═══ PHASE 2: Multi-Domain Frequency Decomposition ═════════════════════  │
-│       LR → DCT (low/mid/high) + DWT (LL/LH/HL/HH) + FFT (low/high)      │
-│       → 9 frequency bands → Adaptive Band Fusion → 3 guidance bands       │
-│                                                                             │
-│  ═══ PHASE 3: Cross-Band Attention + LKA ═══════════════════════════════  │
-│       9 frequency bands → Multi-Head Attention → LKA (k=21) → enhanced   │
-│                                                                             │
-│  ═══ PHASE 4: Collaborative Feature Learning + LKA ═════════════════════  │
-│       features₁₂₃ → Feature Projection → Cross-Expert Attention           │
-│       → LKA Global Refinement → Modulation → enhanced SR₁₂₃              │
-│                                                                             │
-│  ═══ PHASE 5: Hierarchical Multi-Resolution Fusion ═════════════════════  │
-│       Stage 1 (64×64):  Structure extraction                               │
-│       Stage 2 (128×128): Texture integration                               │
-│       Stage 3 (256×256): Detail preservation                               │
-│       + Frequency-guided blending (70% hierarchical + 30% freq-weighted)   │
-│                                                                             │
-│  ═══ PHASE 6: Dynamic Expert Selection ═════════════════════════════════  │
-│       Pixel difficulty estimation → Expert gating (1–3 experts/pixel)      │
-│       Easy pixels → single expert · Hard pixels → full ensemble            │
-│       Difficulty-weighted blending with base fusion                         │
-│                                                                             │
-│  ═══ PHASE 7: Refinement + Edge Enhancement ════════════════════════════  │
-│       Deep residual refinement (4-layer CNN, GELU)                         │
-│       + Bilinear upscale residual connection (learnable scale)             │
-│       + Laplacian Pyramid Edge Enhancement (3 levels)                      │
-│       → Final SR [B, 3, 4H, 4W]                                           │
-│                                                                             │
-│  ═══ [OPTIONAL] TSD-SR Diffusion Refinement (Track B) ══════════════════  │
-│       DiT-based latent diffusion: Teacher (20 steps) / Student (1 step)    │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+LR Input [B, 3, H, W]
+    │
+    ├─── Phase 1: Expert Processing (Frozen) ──────────────────────────────┐
+    │    ├── HAT-L   → [B, 3, 4H, 4W] + features [B, 180, H, W]         │
+    │    ├── DRCT-L  → [B, 3, 4H, 4W] + features [B, 180, H, W]         │
+    │    ├── GRL-B   → [B, 3, 4H, 4W] + features [B, 180, H, W]         │
+    │    └── EDSR-L  → [B, 3, 4H, 4W] + features [B, 256, H, W]         │
+    │                                                                      │
+    ├─── Phase 2: Frequency Decomposition (DCT+DWT+FFT → 9 bands) ───────┤
+    │                                                                      │
+    ├─── Phase 3: Cross-Band Attention + LKA (k=21) ─────────────────────┤
+    │                                                                      │
+    ├─── Phase 4: Collaborative Feature Learning + LKA ───────────────────┤
+    │                                                                      │
+    ├─── Phase 5: Hierarchical Multi-Resolution Fusion (64→128→256) ──────┤
+    │    └── 70% hierarchical + 30% frequency-guided blending             │
+    │                                                                      │
+    ├─── Phase 6: Dynamic Expert Selection (per-pixel difficulty) ────────┤
+    │    └── Difficulty-adaptive blend weight: 0.3 + 0.4 × difficulty     │
+    │                                                                      │
+    ├─── Phase 7: Deep CNN Refinement + Laplacian Edge Enhancement ───────┤
+    │    └── Residual connection from bilinear upscale of LR input        │
+    │                                                                      │
+    └─── Output: SR Image [B, 3, 4H, 4W] ────────────────────────────────┘
+
+    (Optional) Track B: TSD-SR Diffusion Refinement for perceptual quality
 ```
 
 ---
 
 ### Phase 1: Expert Processing (Frozen)
 
-Three pre-trained expert models run as **frozen feature extractors** — their weights never update during training. Only the fusion layers downstream are trainable.
+**File:** `src/models/expert_loader.py` — `ExpertEnsemble` class
 
-| Expert | Architecture | Parameters | Pretrained On | Strength | Intermediate Features |
-|--------|-------------|------------|---------------|----------|-----------------------|
-| **HAT-L** | Hybrid Attention Transformer | ~40.8M | ImageNet + DF2K | High-frequency edges & fine detail | `[B, 180, H, W]` from `conv_after_body` |
-| **DAT** | Dual Aggregation Transformer | ~26.0M | DF2K | Mid-frequency textures | `[B, 180, H, W]` from `conv_after_body` |
-| **NAFNet** | Nonlinear Activation Free Net | ~67.9M | GoPro + DF2K | Low-frequency smooth regions | `[B, 64, H, W]` from encoder output |
+Four pre-trained SR models are loaded with frozen weights. Intermediate features are extracted via PyTorch forward hooks for use in Phase 4 (Collaborative Learning).
 
-**Feature Extraction** uses forward hooks registered on internal layers for reliable capture:
-- **Priority 1**: Hook-based extraction (`forward_all_with_hooks`) — most reliable
-- **Priority 2**: Manual step-by-step extraction (`forward_all_with_features`)
-- **Priority 3**: Pseudo-feature fallback from SR outputs (last resort)
+| Expert | Architecture | Parameters | Embed Dim | Depths | Window |
+|--------|-------------|-----------|-----------|--------|--------|
+| **HAT-L** | Hybrid Attention Transformer | ~40.85M | 180 | [6]×12 | 16 |
+| **DRCT-L** | Dense Residual Connected Transformer | ~27.58M | 180 | [6]×12 | 16 |
+| **GRL-B** | Global-Regional-Local Attention | ~20.20M | 180 | [4,4,8,8,4,4] | 8 |
+| **EDSR-L** | Enhanced Deep Residual SR | ~43.09M | 256 features | 32 blocks | — |
 
-**Multi-GPU Support**: When 2 GPUs are available, HAT runs on GPU 0 while DAT + NAFNet run on GPU 1, with CUDA streams enabling parallel execution for ~2× throughput.
+**Total frozen parameters: ~131.72M**
 
-```python
-# Expert loading with flexible checkpoint discovery
-experts = ExpertEnsemble(
-    upscale=4,
-    window_size=16,
-    device="cuda",
-    checkpoint_dir="pretrained/"
-)
-experts.load_hat(checkpoint_path="pretrained/HAT-L_SRx4_ImageNet-pretrain.pth", freeze=True)
-experts.load_dat(checkpoint_path="pretrained/DAT_x4.pth", freeze=True)
-experts.load_nafnet(checkpoint_path="pretrained/NAFNet-RSTB-x4.pth", freeze=True)
-```
+#### Feature Extraction via Hooks
+
+The `ExpertEnsemble.forward_all_with_hooks()` method:
+1. Registers forward hooks on intermediate layers of each expert
+2. Runs all experts under `torch.no_grad()` for memory efficiency
+3. Clones captured features outside inference mode for autograd compatibility
+4. Returns both SR outputs `{name: [B,3,4H,4W]}` and intermediate features `{name: [B,C,H,W]}`
+
+Feature channel dimensions:
+- HAT: 180 channels (from transformer body)
+- DRCT: 180 channels (from transformer body)
+- GRL: 180 channels (from intermediate blocks)
+- EDSR: 256 channels (from residual body)
+
+#### Input Handling
+
+The `ExpertEnsemble` handles input padding to ensure dimensions are divisible by each expert's window size. After expert processing, outputs are cropped back to the expected HR dimensions.
 
 ---
 
 ### Phase 2: Multi-Domain Frequency Decomposition
 
-Instead of a single frequency transform, the system combines **three complementary transforms** to create a rich 9-band frequency representation:
+**File:** `src/models/multi_domain_frequency.py` — `MultiDomainFrequencyDecomposition` class
 
-| Transform | Bands | Components | Strength |
-|-----------|-------|------------|----------|
-| **DCT** (Discrete Cosine Transform) | 3 | Low / Mid / High | Block-based frequency separation, JPEG-like |
-| **DWT** (Discrete Wavelet Transform) | 4 | LL / LH / HL / HH | Multi-resolution spatial–frequency analysis |
-| **FFT** (Fast Fourier Transform) | 2 | Low-pass / High-pass | Global frequency masking with learnable cutoff |
+Decomposes the LR input into **9 frequency bands** using three complementary transforms:
 
-The 9 raw bands are then fused down to **3 guidance bands** through a learned `BandFusion` module:
+#### DCT (Discrete Cosine Transform) — 3 bands
+- Operates on 8×8 blocks (configurable `block_size`)
+- Uses learned adaptive thresholds via `AdaptiveThresholdNet` (global average pooling → FC layers)
+- Separates into **low**, **mid**, and **high** frequency bands using differentiable sigmoid masking along zigzag-ordered DCT coefficients
+- Temperature parameter (τ=50) controls mask sharpness
 
-```
-DCT: [low, mid, high]     ─┐
-DWT: [LL, LH, HL, HH]     ├──→ 9 bands ──→ BandFusion (1×1 conv + attention) ──→ 3 guidance bands
-FFT: [low_pass, high_pass] ─┘
-```
+#### DWT (Discrete Wavelet Transform) — 3 bands
+- Uses Haar wavelet decomposition
+- Produces **LL** (approximation), **LH+HL** (horizontal+vertical edges), **HH** (diagonal detail) subbands
+- Each subband is upsampled back to input resolution
 
-**Adaptive Band Splitting**: When using baseline 3-band DCT mode, an `AdaptiveFrequencyBandPredictor` dynamically adjusts the low/high frequency split ratios per image, allowing content-aware frequency partitioning.
+#### FFT (Fast Fourier Transform) — 3 bands
+- Computes 2D FFT with spectral shift
+- Applies learned radial masks (`FFTMaskNet`) to separate **low**, **mid**, **high** frequency rings
+- Masks are generated from global features via adaptive networks
+- Inverse FFT reconstructs spatial-domain bands
 
-Implementation: `src/models/multi_domain_frequency.py` (~687 lines)
+#### Band Attention
+Each of the 9 bands passes through `BandAttention` (channel squeeze-and-excitation with reduction ratio 4) for adaptive recalibration.
 
----
-
-### Phase 3: Enhanced Cross-Band Attention + LKA
-
-All 9 frequency bands interact through **multi-head attention**, allowing the model to learn relationships between DCT, DWT, and FFT representations.
-
-When LKA is enabled, each attention block is followed by **Large Kernel Attention (k=21)** for global receptive field coverage:
-
-```
-Frequency Bands [9 × (B, dim, H, W)]
-    ↓
-Multi-Head Attention (num_heads=4–8)
-    ↓
-Large Kernel Attention (decomposed: 5×5 DW-Conv → 7×7 dilated-DW → 1×1 PW)
-    ↓
-Enhanced Frequency Bands [9 × (B, dim, H, W)]
-```
-
-**LKA Decomposition**: The 21×21 kernel is decomposed into three efficient operations:
-1. **5×5 depth-wise convolution** — local features
-2. **7×7 dilated depth-wise convolution** (dilation=3, effective RF=21) — long-range context
-3. **1×1 point-wise convolution** — channel mixing
-
-Implementation: `src/models/large_kernel_attention.py` (~501 lines)
+**Output:** 9 raw bands `[B, 3, H, W]` each + 3 fused guidance bands (DCT+DWT+FFT fused per frequency tier)
 
 ---
 
-### Phase 4: Enhanced Collaborative Learning + LKA
+### Phase 3: Cross-Band Attention + LKA
 
-Expert intermediate features (extracted via hooks) are shared between experts through cross-attention, enabling **knowledge transfer** between HAT's edge expertise, DAT's texture knowledge, and NAFNet's smooth region handling.
+**Files:** `src/models/enhanced_fusion_v2.py` (CrossBandAttention), `src/models/large_kernel_attention.py` (LKA modules)
 
+Multi-head attention across the 9 frequency bands, augmented with Large Kernel Attention for global spatial context.
+
+#### Cross-Band Attention
+- Projects each band to a `hidden_dim=32` space via 1×1 convolutions
+- Applies `nn.MultiheadAttention` (4 heads) across bands at each spatial location
+- Learnable `band_gates` (softmax-normalized) weight each band's contribution
+- Residual connection: `output = original + gate_weight × attention_output`
+
+#### Large Kernel Attention (LKA, k=21)
+
+The `EnhancedCrossBandWithLKA` module augments cross-band attention with an LKA block that captures global spatial context.
+
+**LKA Kernel Decomposition:** A 21×21 convolution is decomposed into four efficient operations:
 ```
-HAT features  [B, 180, H, W] ──→ Projection (1×1) ──→ [B, 128, H, W] ─┐
-DAT features  [B, 180, H, W] ──→ Projection (1×1) ──→ [B, 128, H, W] ─┼─→ Cross-Expert Attention
-NAFNet features [B, 64, H, W] ──→ Projection (1×1) ──→ [B, 128, H, W] ─┘        ↓
-                                                                         LKA Global Refinement (k=21)
-                                                                                  ↓
-                                                                         Modulation Generation
-                                                                                  ↓
-                                                                         Enhanced SR₁, SR₂, SR₃
+5×5 Depthwise Conv → 1×21 Depthwise Dilated Conv (d=3)
+                    → 21×1 Depthwise Dilated Conv (d=3)
+                    → 1×1 Pointwise Conv
+```
+This decomposition reduces parameters from O(k²) to O(k) while maintaining the 21×21 effective receptive field.
+
+**LKA Block architecture:**
+```
+Input → LayerNorm → LKA → Residual Add → LayerNorm → FFN (expand×4) → Residual Add → Output
 ```
 
-**Key Parameters**:
-- `collab_dim`: 128 (= 2 × fusion_dim)
-- `collab_heads`: 8 (= 2 × num_heads)
-- LKA kernel: 21
+The `EnhancedCrossBandWithLKA` processes all 9 bands:
+1. Projects bands to `dim=64` channels
+2. Stacks into `[B, 9, dim, H, W]` → applies cross-band attention
+3. Applies shared LKA block for spatial refinement
+4. Projects back to 3 channels per band
+
+---
+
+### Phase 4: Collaborative Feature Learning + LKA
+
+**File:** `src/models/enhanced_fusion_v2.py` — `CollaborativeFeatureLearning` class, wrapped by `EnhancedCollaborativeWithLKA`
+
+Cross-expert attention on intermediate features enables knowledge sharing between experts:
+
+- **HAT** (180ch) shares high-frequency transformer features with DRCT/GRL/EDSR
+- **DRCT** (180ch) shares dense-residual features with HAT/GRL/EDSR
+- **GRL** (180ch) shares global/regional/local features with HAT/DRCT/EDSR
+- **EDSR** (256ch) shares deep convolutional features with HAT/DRCT/GRL
+
+#### Mechanism
+1. **Feature Projection:** Each expert's features are projected to `common_dim=128` via 1×1 convolutions
+2. **Cross-Expert Attention:** `nn.MultiheadAttention` (8 heads) attends across experts at each spatial location
+3. **Consensus Refinement:** Mean of attention outputs → 3×3 conv refinement → consensus features
+4. **Output Modulation:** Per-expert modulation maps (sigmoid, 0-1) scale each expert's SR output by `(1 + 0.2 × modulation)`
+5. **LKA Enhancement:** Shared LKA block (k=21) adds global spatial context after attention
 
 ---
 
 ### Phase 5: Hierarchical Multi-Resolution Fusion
 
-Rather than merging experts at a single resolution, expert outputs are progressively fused through **three hierarchical stages**:
+**File:** `src/models/hierarchical_fusion.py` — `HierarchicalMultiResolutionFusion` class
 
-| Stage | Resolution | Purpose | Operation |
-|-------|------------|---------|-----------|
-| Stage 1 | 64×64 | **Structure** extraction | Downsample → Conv → Channel/Spatial Attention |
-| Stage 2 | 128×128 | **Texture** integration | Upsample Stage 1 + Mid-res features → Conv → Attention |
-| Stage 3 | 256×256 | **Detail** preservation | Upsample Stage 2 + Full-res features → Conv → Attention |
+Progressive fusion at three resolutions captures structure, texture, and detail at different scales.
 
-The final output blends **70% hierarchical fusion** with **30% frequency-guided weighting**:
+#### Three-Stage Progressive Fusion
 
-```python
-# Frequency guidance assigns experts to regions based on content:
-# High-freq magnitude → HAT weight
-# Mid-freq magnitude  → DAT weight
-# Low-freq magnitude  → NAFNet weight
-fused = hierarchical_output * 0.7 + freq_weighted_output * 0.3
-```
+| Level | Resolution | Focus | Components |
+|-------|-----------|-------|------------|
+| **Stage 1** | 64×64 | Coarse structure | 4-expert concat → ResBlocks → SpatialGating → 3ch output |
+| **Stage 2** | 128×128 | Textures | 4-expert concat + Stage 1 upsampled → ResBlocks → SpatialGating |
+| **Stage 3** | 256×256 | Fine details | 4-expert concat + Stage 2 upsampled → ResBlocks → SpatialGating |
 
-Implementation: `src/models/hierarchical_fusion.py` (~227 lines)
+Each stage uses:
+- **Residual Blocks:** Conv3×3 → GELU → Conv3×3 + skip connection
+- **Spatial Gating:** Conv3×3 → GELU → Conv3×3 → Sigmoid (learns where to refine)
+- **Progressive residuals:** Each stage refines the previous stage's upsampled output
+
+#### Frequency-Guided Routing
+
+In `CompleteEnhancedFusionSR._run_pipeline()`, the hierarchical output is blended with a frequency-guided fusion:
+- `routing_lr` (enhanced by Phase 3 cross-band attention) is upscaled to HR resolution
+- A `freq_weight_conv` (1×1 → GELU → 1×1) predicts per-pixel per-expert softmax weights
+- **Final blend: 70% hierarchical + 30% frequency-guided**
+
+This creates a gradient path: `loss → freq_weight_conv → routing_lr → cross_band → freq_decomp`
 
 ---
 
 ### Phase 6: Dynamic Expert Selection
 
-A lightweight CNN estimates **per-pixel difficulty** and generates **expert gating weights**, allowing the network to adaptively use 1–3 experts per pixel:
+**File:** `src/models/enhanced_fusion_v2.py` — `DynamicExpertSelector` class
 
+Per-pixel difficulty estimation adaptively routes experts:
+
+#### Difficulty Estimation Network
 ```
-LR Input → MultiScaleFeatureExtractor → DynamicExpertSelector
-                                            ├── gates [B, 3, H, W]     (expert weights per pixel)
-                                            └── difficulty [B, 1, H, W] (pixel difficulty estimate)
-
-Easy pixels (smooth areas)  → mostly NAFNet (single expert)
-Medium pixels (textures)    → DAT + NAFNet blend
-Hard pixels (edges/detail)  → full HAT + DAT + NAFNet ensemble
+LR Input → Conv3×3 → ReLU → Conv3×3 → ReLU → Conv3×3 → Sigmoid → difficulty [B,1,H,W]
 ```
 
-**Blending formula**:
+#### Gate Network
+```
+LR Input → Conv3×3 → ReLU → Conv3×3 → ReLU → Conv1×1 → raw_gates [B,4,H,W]
+```
+
+#### Adaptive Gating Logic
 ```python
-refined = base_fusion * (1 - 0.3 * difficulty) + dynamic_gated_fusion * (0.3 * difficulty)
+threshold = 0.7 - 0.5 × difficulty           # Lower threshold for harder pixels
+gates = sigmoid(temperature × (raw_gates - threshold))  # Learnable temperature (init=10)
+gates = gates / (gates.sum(dim=1) + 1e-8)    # Normalized, min gate_sum=0.3
 ```
 
-The `DynamicExpertSelector` uses:
-- Dual-branch difficulty estimation (local + global via AdaptiveAvgPool)
-- Softmax-normalized gates ensuring weights sum to 1
-- Temperature-controlled sharpness
+**Expert routing strategy:**
+- **Easy pixels** (sky, smooth): Most weight on EDSR (fast convolutional baseline)
+- **Medium pixels** (texture): DRCT + GRL dominant
+- **Hard pixels** (edges, complex detail): HAT + DRCT + GRL all contribute
+
+#### Blending with Phase 5
+```python
+blend_weight = 0.3 + 0.4 × difficulty_hr  # Range: [0.3, 0.7]
+fused = (1 - blend_weight) × phase5_fused + blend_weight × dynamic_fused
+```
+Harder regions get more dynamic selection influence; easier regions rely more on hierarchical fusion.
 
 ---
 
 ### Phase 7: Multi-Level Refinement + Edge Enhancement
 
-The final phase applies three sequential refinement steps:
+#### 7a: Deep CNN Refinement
 
-**Step 1 — Deep Residual Refinement**:
+A deep residual refinement network processes the fused output:
 ```
-Fused [B, 3, H, W] → Conv(3→64) → GELU → Conv(64→64) → GELU → ... → Conv(64→3)
-                                    ↓
-Output = Fused + 0.1 × Residual    (scaled residual connection)
+Fused → Conv3×3 (3→128) → GELU → [Conv3×3 → GELU] × 4 → Conv3×3 (128→3) → × 0.1 → + Fused
 ```
-- Depth: 4 layers (configurable via `refine_depth`)
-- Channels: 64 (configurable via `refine_channels`)
-- Activation: GELU
 
-**Step 2 — Bilinear Upscale Residual**:
+- **Depth:** 6 convolutional layers (configurable `refine_depth`)
+- **Width:** 128 channels (configurable `refine_channels`)
+- **Residual scaling:** Output is multiplied by 0.1 before adding back (prevents early-training instability)
+
+#### 7b: Laplacian Pyramid Edge Enhancement
+
+**File:** `src/models/edge_enhancement.py` — `LaplacianPyramidRefinement` class
+
+Multi-scale edge sharpening using a Gaussian blur pyramid:
+
+1. **Gaussian Pyramid:** Input → 3 levels of Gaussian blur (σ=1.0, kernel=5×5)
+2. **Laplacian Extraction:** `laplacian[i] = level[i] - blur(level[i])` (captures edges at each scale)
+3. **Learned Refinement:** Each Laplacian level passes through a `RefinementBlock`:
+   ```
+   Laplacian → Conv3×3 (3→32) → ReLU → Conv3×3 (32→32) → ReLU → Conv3×3 (32→3) + Skip
+   ```
+4. **Multi-scale fusion:** `output = input + edge_strength × Σ(refined_laplacians)` where `edge_strength=0.15`
+
+#### Global Residual Connection
+
+After Phases 7a and 7b, a bilinear upscale of the original LR input is added:
 ```python
-bilinear_up = F.interpolate(lr_input, size=(H_hr, W_hr), mode='bilinear')
-output = output + residual_scale * bilinear_up  # residual_scale: learnable, initialized to 0.1
-output = output.clamp(0, 1)
-```
-
-**Step 3 — Laplacian Pyramid Edge Enhancement**:
-```
-Input → Laplacian Pyramid (3 levels)
-         Level 1: full-res edge detection → Conv refinement
-         Level 2: 1/2-res edge detection → Conv refinement → upsample
-         Level 3: 1/4-res edge detection → Conv refinement → upsample
-→ Multi-scale edge fusion → Output + edge_strength × enhanced_edges
-```
-- `edge_strength`: 0.15 (controls sharpening intensity)
-- Uses Laplacian kernel `[[0,-1,0],[-1,4,-1],[0,-1,0]]` at each scale
-
-Implementation: `src/models/edge_enhancement.py` (~316 lines)
-
----
-
-## 📊 Loss Functions
-
-The system employs **8 complementary loss functions** with a **multi-stage scheduling** strategy:
-
-### Available Losses
-
-| Loss | Class | Purpose | Details |
-|------|-------|---------|---------|
-| **L1** | `L1Loss` | Pixel-level accuracy | Standard absolute error |
-| **Charbonnier** | `CharbonnierLoss` | Smooth L1 variant | `√(x² + ε²)`, ε=1e-3, handles outliers |
-| **VGG Perceptual** | `VGGPerceptualLoss` | Feature-level similarity | VGG19: relu1_2, 2_2, 3_4, 4_4, 5_4 with ImageNet normalization |
-| **SSIM** | `SSIMLoss` | Structural similarity | GPU-accelerated, Gaussian window (σ=1.5, k=11) |
-| **SWT Frequency** | `SWTLoss` | Wavelet domain fidelity | Stationary Wavelet Transform (Haar), translation-invariant, 2-level |
-| **FFT Frequency** | `FFTLoss` | Fourier domain fidelity | High-freq weighted (2×), global frequency matching |
-| **Edge** | `EdgeLoss` | Edge preservation | Sobel-based gradient matching |
-| **CLIP Semantic** | `CLIPSemanticLoss` | Semantic consistency | CLIP ViT-B/32 cosine similarity |
-
-### Multi-Stage Loss Scheduling
-
-Training progresses through **3 loss stages**, gradually transitioning from pixel accuracy to perceptual quality:
-
-| Stage | Epochs | Name | Strategy | Key Weights |
-|-------|--------|------|----------|-------------|
-| **Stage 1** | 0–50 | `pixel_focus` | Establish accurate pixel reconstruction | L1=1.0, Charb=0.5 |
-| **Stage 2** | 50–100 | `frequency_aware` | Add frequency-domain constraints | L1=0.8, SWT=0.1, FFT=0.1 |
-| **Stage 3** | 100–200 | `perceptual_refine` | Balance pixel + perceptual quality | L1=0.5, VGG=0.2, SSIM=0.2, SWT=0.1 |
-
-```python
-# The CombinedLoss class aggregates all enabled losses
-combined = CombinedLoss(
-    l1_weight=1.0,
-    charbonnier_weight=0.5,
-    vgg_weight=0.1,
-    ssim_weight=0.1,
-    swt_weight=0.05,
-    fft_weight=0.05,
-    edge_weight=0.02,
-    clip_weight=0.01
-)
+bilinear = F.interpolate(lr_input, size=(H_hr, W_hr), mode='bilinear')
+final_sr = (fused + residual_scale × bilinear).clamp(0, 1)  # residual_scale is learnable (init=0.1)
 ```
 
 ---
 
-## 🚀 Installation
+### Track B: TSD-SR Diffusion Refinement
+
+**Files:** `src/models/tsdsr_wrapper.py`, `src/models/complete_sr_pipeline.py`
+
+For perceptual quality optimization (Track B), the pipeline integrates TSD-SR (Target Score Distillation Super-Resolution):
+
+#### Architecture
+- **VAE Encoder/Decoder:** Converts between pixel space and latent space (4 channels, 8× downscale)
+- **Student Model:** One-step distilled transformer for fast inference
+- **Teacher Model:** Multi-step diffusion for highest quality (optional)
+
+#### Pipeline
+1. Phase 1-7 produces a PSNR-optimized SR image
+2. VAE encodes SR image to latent space `[B, 4, H/8, W/8]`
+3. Student transformer denoises in one step (or teacher in multiple steps)
+4. VAE decodes back to pixel space
+5. Blended output: `α × PSNR_result + (1-α) × diffusion_result`
+
+**Note:** TSD-SR is disabled during training (`use_during_training: false`) and used only at inference for Track B submissions.
+
+---
+
+## Project Structure
+
+```
+super-resolution/
+├── train.py                          # Main training script
+├── requirements.txt                  # Python dependencies
+├── configs/
+│   └── train_config.yaml             # Complete training configuration
+├── src/
+│   ├── models/
+│   │   ├── __init__.py               # Module exports (v1 + v2 APIs)
+│   │   ├── expert_loader.py          # ExpertEnsemble — 4 frozen experts + hooks
+│   │   ├── enhanced_fusion_v2.py     # CompleteEnhancedFusionSR — Phases 2-7
+│   │   ├── multi_domain_frequency.py # Phase 2: DCT+DWT+FFT decomposition
+│   │   ├── large_kernel_attention.py # LKA modules (k=21 decomposed)
+│   │   ├── hierarchical_fusion.py    # Phase 5: 64→128→256 progressive fusion
+│   │   ├── edge_enhancement.py       # Phase 7b: Laplacian pyramid refinement
+│   │   ├── complete_sr_pipeline.py   # CompleteSRPipeline — all 7 phases + TSD-SR
+│   │   ├── fusion_network.py         # V1 fusion components (legacy)
+│   │   ├── enhanced_fusion.py        # V1 enhanced fusion (legacy)
+│   │   └── tsdsr_wrapper.py          # TSD-SR diffusion refinement
+│   ├── data/
+│   │   ├── dataset.py                # SRDataset, DF2KDataset, ValidationDataset
+│   │   ├── augmentations.py          # Paired augmentations (crop, flip, rotate, color)
+│   │   └── cached_dataset.py         # CachedSRDataset — pre-computed expert outputs
+│   ├── losses/
+│   │   └── perceptual_loss.py        # 8 loss functions + CombinedLoss scheduler
+│   ├── training/
+│   │   └── multi_stage_scheduler.py  # MultiStageLossScheduler
+│   └── utils/
+│       ├── metrics.py                # PSNR, SSIM, LPIPS calculators
+│       ├── checkpoint_manager.py     # CheckpointManager + EMAModel
+│       └── perceptual_metrics.py     # Additional perceptual quality metrics
+├── scripts/                          # Utility scripts
+│   ├── validate.py                   # Validation evaluation
+│   ├── extract_features_balanced.py  # Cache expert outputs for fast training
+│   ├── test_inference.py             # Single-image inference
+│   └── ...                           # Additional utility scripts
+└── pretrained/                       # Pre-trained expert weights (not tracked)
+    ├── hat/HAT-L_SRx4_ImageNet-pretrain.pth
+    ├── drct/DRCT-L_X4.pth
+    ├── grl/GRL-B_SR_x4.pth
+    └── edsr/EDSR_Lx4_f256b32_DIV2K_official-76ee1c8f.pth
+```
+
+---
+
+## Installation
 
 ### Prerequisites
+- Python 3.8+
+- PyTorch 2.0+ with CUDA 11.8+
+- 26GB+ VRAM (single GPU training)
 
-- **Python** 3.8+
-- **CUDA** 11.8+ (for GPU training)
-- **VRAM**: 12GB+ recommended (16GB+ for multi-domain frequency + LKA)
-
-### Step 1: Clone Repository
+### Setup
 
 ```bash
+# Clone the repository
 git clone https://github.com/Nikhil-AI-Labs/Image-Super-Resolution.git
 cd Image-Super-Resolution
-```
 
-### Step 2: Create Environment
-
-```bash
-# Using conda (recommended)
-conda create -n championship-sr python=3.10
-conda activate championship-sr
-
-# Or using venv
+# Create virtual environment
 python -m venv venv
-source venv/bin/activate       # Linux/Mac
-.\venv\Scripts\activate        # Windows
-```
+source venv/bin/activate  # Linux/Mac
+# or: venv\Scripts\activate  # Windows
 
-### Step 3: Install Dependencies
-
-```bash
-pip install -r requirements.txt
-
-# PyTorch with CUDA (if not installed)
+# Install PyTorch with CUDA (adjust for your CUDA version)
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 
-# Optional: Perceptual metrics
-pip install lpips pyiqa
-
-# Optional: SWT Loss (recommended)
-pip install PyWavelets
-
-# Optional: CLIP semantic loss
-pip install git+https://github.com/openai/CLIP.git
-
-# Optional: TSD-SR diffusion (Track B)
-pip install safetensors diffusers
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-### Step 4: Download Pretrained Expert Weights
+### Pre-trained Expert Weights
 
-```bash
-mkdir -p pretrained
+Download the four expert model weights and place them in the `pretrained/` directory:
 
-# Place expert model checkpoints:
-# pretrained/HAT-L_SRx4_ImageNet-pretrain.pth    (HAT-L)
-# pretrained/DAT_x4.pth                          (DAT)
-# pretrained/NAFNet-RSTB-x4.pth                  (NAFNet)
-
-# For Track B — TSD-SR weights:
-# pretrained/teacher/teacher.safetensors
-# pretrained/tsdsr/transformer.safetensors
-# pretrained/tsdsr/vae.safetensors
-```
-
----
-
-## ⚡ Quick Start
-
-### Inference (Minimal)
-
-```python
-import torch
-from src.models import ExpertEnsemble, CompleteEnhancedFusionSR
-
-# Load frozen experts
-experts = ExpertEnsemble(upscale=4, checkpoint_dir="pretrained/")
-experts.load_hat(freeze=True)
-experts.load_dat(freeze=True)
-experts.load_nafnet(freeze=True)
-
-# Create fusion model with all improvements
-model = CompleteEnhancedFusionSR(
-    expert_ensemble=experts,
-    num_experts=3,
-    fusion_dim=64,
-    num_heads=4,
-    refine_depth=4,
-    refine_channels=64,
-    enable_hierarchical=True,
-    enable_dynamic_selection=True,
-    enable_cross_band_attn=True,
-    enable_adaptive_bands=True,
-    enable_multi_resolution=True,
-    enable_collaborative=True,
-).eval().cuda()
-
-# Load trained fusion weights
-ckpt = torch.load("checkpoints/best.pth")
-model.load_state_dict(ckpt["model_state_dict"], strict=False)
-
-# Super-resolve
-lr = torch.rand(1, 3, 64, 64).cuda()  # Replace with actual LR image
-with torch.no_grad():
-    sr = model(lr)  # Output: [1, 3, 256, 256]
-```
-
-### Command-Line Validation
-
-```bash
-# Validate with metrics
-python scripts/validate.py \
-    --checkpoint checkpoints/best.pth \
-    --hr_dir data/DF2K/val_HR \
-    --lr_dir data/DF2K/val_LR
-
-# Validate and save output images
-python scripts/validate.py \
-    --checkpoint checkpoints/best.pth \
-    --input_dir data/test_LR \
-    --output_dir results/output \
-    --save_images
-```
-
----
-
-## 🎓 Training
+| Expert | Source | Weight File |
+|--------|--------|-------------|
+| HAT-L | [HAT GitHub](https://github.com/XPixelGroup/HAT) | `pretrained/hat/HAT-L_SRx4_ImageNet-pretrain.pth` |
+| DRCT-L | [DRCT GitHub](https://github.com/ming053l/DRCT) | `pretrained/drct/DRCT-L_X4.pth` |
+| GRL-B | [GRL GitHub](https://github.com/ofsoundof/GRL-Image-Restoration) | `pretrained/grl/GRL-B_SR_x4.pth` |
+| EDSR-L | [EDSR/BasicSR](https://github.com/sanghyun-son/EDSR-PyTorch) | `pretrained/edsr/EDSR_Lx4_f256b32_DIV2K_official-76ee1c8f.pth` |
 
 ### Dataset Preparation
 
+Prepare the DF2K dataset (DIV2K + Flickr2K) with pre-generated 4× downscaled LR images:
+
 ```
-data/DF2K/
-├── train_HR/         # High-resolution training images (DIV2K + Flickr2K)
-├── train_LR/         # Pre-generated 4× downsampled LR images
-│   └── X4/           # (alternative nested structure also supported)
-├── val_HR/           # Validation HR images
-└── val_LR/           # Validation LR images
-    └── X4/
+dataset/DF2K/
+├── train_HR/          # High-resolution training images
+├── train_LR/          # Low-resolution training images (4× downscaled)
+├── val_HR/            # High-resolution validation images
+└── val_LR/            # Low-resolution validation images
 ```
 
-The `SRDataset` class automatically discovers LR/HR pairs and supports both flat and nested (`X4/`) directory structures.
+---
+
+## Quick Start
+
+### Single Image Inference
+
+```python
+import torch
+from src.models import ExpertEnsemble, create_training_pipeline
+from PIL import Image
+from torchvision import transforms
+
+# Load expert ensemble
+expert_ensemble = ExpertEnsemble(
+    hat_weight_path="pretrained/hat/HAT-L_SRx4_ImageNet-pretrain.pth",
+    drct_weight_path="pretrained/drct/DRCT-L_X4.pth",
+    grl_weight_path="pretrained/grl/GRL-B_SR_x4.pth",
+    edsr_weight_path="pretrained/edsr/EDSR_Lx4_f256b32_DIV2K_official-76ee1c8f.pth",
+)
+
+# Create the 7-phase pipeline
+model = create_training_pipeline(expert_ensemble, device='cuda')
+
+# Load and preprocess image
+lr_image = Image.open("input_lr.png").convert("RGB")
+lr_tensor = transforms.ToTensor()(lr_image).unsqueeze(0).cuda()
+
+# Super-resolve
+with torch.no_grad():
+    sr_tensor = model(lr_tensor)
+
+# Save result
+sr_image = transforms.ToPILImage()(sr_tensor.squeeze(0).cpu().clamp(0, 1))
+sr_image.save("output_sr.png")
+```
+
+---
+
+## Training
 
 ### Standard Training
 
 ```bash
-# Train from scratch
 python train.py --config configs/train_config.yaml
-
-# Resume from checkpoint
-python train.py --config configs/train_config.yaml --resume checkpoints/epoch_50.pth
-
-# Debug mode (5 epochs, small batches)
-python train.py --config configs/train_config.yaml --debug
 ```
 
-### Cached Training (10–20× Faster)
+This runs the full pipeline including live expert inference at every training step.
 
-Pre-compute expert outputs once, then train the fusion network without running the frozen experts:
+### Cached Training (10-20× Faster)
+
+Cached training pre-computes all expert outputs and intermediate features, then loads them from disk during training. This skips Phase 1 entirely, reducing VRAM usage and achieving **10-20× speedup**.
+
+#### Step 1: Extract and Cache Expert Outputs
 
 ```bash
-# Step 1: Extract and cache expert outputs to disk
 python scripts/extract_features_balanced.py \
-    --hr_dir data/DF2K/train_HR \
-    --lr_dir data/DF2K/train_LR \
-    --output_dir data/cached_features
-
-# Step 2: Train using cached features (uses CachedSRDataset)
-python train.py --config configs/train_config.yaml --cached \
-    --cache_dir data/cached_features
+    --hr_dir dataset/DF2K/train_HR \
+    --lr_dir dataset/DF2K/train_LR \
+    --output_dir cached_features/train
 ```
 
-In cached mode:
-- Expert models are **not loaded** into memory (saves ~12GB VRAM)
-- `forward_with_precomputed()` is called instead of `forward()`
-- Training throughput increases 10–20× since frozen expert inference is eliminated
-- Intermediate features for collaborative learning are also cached
+This generates per-image `.pt` files containing:
+- `lr`: LR input tensor `[3, H, W]`
+- `hr`: HR target tensor `[3, 4H, 4W]`
+- `expert_imgs`: `{hat: [3,4H,4W], drct: ..., grl: ..., edsr: ...}`
+- `expert_feats`: `{hat: [180,H,W], drct: [180,H,W], grl: [180,H,W], edsr: [256,H,W]}`
 
-### Data Augmentation
+#### Step 2: Train with Cached Features
 
-Applied on-the-fly during training via `SRDataAugmentation`:
-
-| Augmentation | Probability | Details |
-|-------------|-------------|---------|
-| Random Crop | 100% | 64×64 LR patch (→ 256×256 HR) |
-| Horizontal Flip | 50% | Applied to both LR and HR |
-| Vertical Flip | 50% | Applied to both LR and HR |
-| Rotation | 50% | 90°/180°/270° |
-| Color Jitter | 20% | Brightness ±0.1, Contrast ±0.1 |
-| Mixup | 10% | α=0.2, blend two training pairs |
-
-### Google Colab Training
-
-A self-contained training script for Colab is provided:
-
-```python
-# colab_trainable.py — single-file version with all components inlined
-# Designed for Colab's single-GPU environment with Google Drive integration
+```bash
+python train.py --config configs/train_config.yaml --cached --cache_dir cached_features/train
 ```
+
+The `CachedSRDataset` class (`src/data/cached_dataset.py`) loads pre-computed features and applies geometric augmentations (flip, rotation) consistently across all tensors.
+
+### Resuming Training
+
+```bash
+python train.py --config configs/train_config.yaml --resume checkpoints/phase3_single_gpu/checkpoint_epoch_100.pth
+```
+
+Resumes training from a checkpoint, restoring model weights, optimizer state, scheduler state, and EMA parameters.
 
 ---
 
-## 📊 Evaluation
+### Multi-Stage Loss Scheduling
 
-### Track A — Restoration Quality (PSNR/SSIM)
+Training uses a **3-stage loss strategy** that gradually introduces frequency and perceptual losses:
+
+| Stage | Epochs | Name | Loss Weights | Purpose |
+|-------|--------|------|-------------|---------|
+| **1** | 0–80 | `foundation_psnr` | L1=1.0 | Build strong pixel-level reconstruction |
+| **2** | 80–150 | `frequency_refinement` | L1=0.75, SWT=0.20, FFT=0.05 | Enhance frequency detail |
+| **3** | 150–200 | `detail_enhancement` | L1=0.60, SWT=0.25, FFT=0.10, SSIM=0.05 | Final texture and edge refinement |
+
+The `MultiStageLossScheduler` (`src/training/multi_stage_scheduler.py`) automatically transitions between stages based on the current epoch.
+
+---
+
+### Training Configuration
+
+Key training hyperparameters from `configs/train_config.yaml`:
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| Total Epochs | 200 | Full training duration |
+| Batch Size | 32 | Per-GPU batch size |
+| Optimizer | AdamW | With weight decay 1e-4 |
+| Learning Rate | 1e-4 | Initial learning rate |
+| LR Schedule | CosineAnnealingWarmRestarts | T₀=50, T_mult=2, η_min=5e-8 |
+| Warmup | 5 epochs | From 5e-7 to 1e-4 |
+| Gradient Clipping | 1.0 | Max gradient norm |
+| Precision | FP16 (AMP) | Mixed precision training |
+| EMA Decay | 0.9995 | Exponential moving average |
+| LR Patch Size | 64×64 | Training crop size |
+| Scale Factor | 4× | Upscaling factor |
+| Dataset Repeat | 20× | Effective epoch length multiplier |
+
+---
+
+## Inference
+
+### Validation
 
 ```bash
 python scripts/validate.py \
-    --checkpoint checkpoints/best.pth \
-    --hr_dir data/DF2K/val_HR \
-    --lr_dir data/DF2K/val_LR
+    --config configs/train_config.yaml \
+    --checkpoint checkpoints/phase3_single_gpu/best_psnr.pth \
+    --output_dir results/validation
 ```
 
-Metrics are computed on the **Y channel** (luminance) with a **4-pixel border crop**, following NTIRE evaluation standards using ITU-R BT.601 RGB→Y conversion.
+Metrics are computed on the Y channel (luminance) with a 4-pixel border crop, following NTIRE evaluation standards.
 
-### Track B — Perceptual Quality
+### Track B (Perceptual Quality)
 
-```bash
-python scripts/evaluate_phase7.py \
-    --psnr_checkpoint checkpoints/best.pth \
-    --models baseline teacher student \
-    --save_images
-```
-
-### Perceptual Metrics
-
-| Metric | Type | Range | Direction | Library |
-|--------|------|-------|-----------|---------|
-| **LPIPS** | Full-Reference | 0–1 | Lower ↓ | `lpips` (AlexNet backbone) |
-| **DISTS** | Full-Reference | 0–1 | Lower ↓ | `pyiqa` |
-| **CLIP-IQA** | No-Reference | 0–1 | Higher ↑ | `pyiqa` |
-| **MANIQA** | No-Reference | 0–1 | Higher ↑ | `pyiqa` |
-| **MUSIQ** | No-Reference | 0–100 | Higher ↑ | `pyiqa` |
-| **NIQE** | No-Reference | 0–10+ | Lower ↓ | `pyiqa` |
-
-**NTIRE 2025 Official Perceptual Score**:
-```
-Score = (1 - LPIPS) + (1 - DISTS) + CLIP-IQA + MANIQA + (MUSIQ / 100) + max(0, 10 - NIQE / 10)
-```
-Range: ~0–6 (higher is better).
-
----
-
-## 📁 Project Structure
-
-```
-Image-Super-Resolution/
-│
-├── 📄 README.md                          # This file
-├── 📄 requirements.txt                   # Python dependencies
-├── 📄 train.py                           # Main training script (1,221 lines)
-├── 📄 colab_trainable.py                 # Self-contained Colab training script
-│
-├── 📂 configs/
-│   └── train_config.yaml                 # Full training configuration (342 lines)
-│
-├── 📂 src/
-│   ├── 📂 data/
-│   │   ├── dataset.py                    # SRDataset, ValidationDataset
-│   │   ├── cached_dataset.py            # CachedSRDataset (precomputed features)
-│   │   ├── augmentations.py             # SRDataAugmentation pipeline
-│   │   └── frequency_decomposition.py   # DCT/IDCT frequency analysis
-│   │
-│   ├── 📂 losses/
-│   │   └── perceptual_loss.py           # All 8 loss functions + CombinedLoss (1,520 lines)
-│   │
-│   ├── 📂 models/
-│   │   ├── expert_loader.py             # ExpertEnsemble: HAT, DAT, NAFNet (1,160 lines)
-│   │   ├── fusion_network.py            # FrequencyAwareFusion components (1,498 lines)
-│   │   ├── enhanced_fusion.py           # CompleteEnhancedFusionSR v1 (991 lines)
-│   │   ├── enhanced_fusion_v2.py        # CompleteEnhancedFusionSR v2 (1,129 lines)
-│   │   ├── multi_domain_frequency.py    # DCT+DWT+FFT decomposition (687 lines)
-│   │   ├── large_kernel_attention.py    # LKA modules for Phase 3/4 (501 lines)
-│   │   ├── hierarchical_fusion.py       # Multi-resolution fusion (227 lines)
-│   │   ├── edge_enhancement.py          # Laplacian pyramid refinement (316 lines)
-│   │   ├── complete_sr_pipeline.py      # CompleteSRPipeline + TSD-SR (551 lines)
-│   │   │
-│   │   ├── 📂 hat/                      # HAT-L architecture files
-│   │   ├── 📂 mambair/                  # MambaIR/DAT architecture files
-│   │   ├── 📂 nafnet/                   # NAFNet architecture files
-│   │   └── 📂 tsdsr/                    # TSD-SR DiT architecture
-│   │       └── dit.py                   # Diffusion Transformer
-│   │
-│   └── 📂 utils/
-│       ├── metrics.py                   # PSNR, SSIM (GPU-accelerated)
-│       ├── perceptual_metrics.py        # LPIPS, CLIP-IQA, MANIQA, etc.
-│       ├── checkpoint_manager.py        # Best-K checkpoints, EMA, atomic saves
-│       └── logger.py                    # TensorBoard logging
-│
-├── 📂 scripts/
-│   ├── validate.py                      # Validation script
-│   ├── validate_checkpoint.py           # Checkpoint validation
-│   ├── evaluate_phase7.py               # Track B perceptual evaluation
-│   ├── extract_features_balanced.py     # Cache expert outputs to disk
-│   ├── param_breakdown.py               # Parameter count analysis
-│   ├── monitor_training.py              # Live training monitoring
-│   ├── launch_phase5_training.ps1       # PowerShell launch script
-│   └── test_*.py                        # Unit and integration tests
-│
-├── 📂 pretrained/                       # Pretrained expert weights
-└── 📂 checkpoints/                      # Training checkpoints
-```
-
----
-
-## 🔧 Model Details
-
-### CompleteEnhancedFusionSR (Main Model)
-
-The core trainable model implementing Phases 2–7:
+For Track B submissions with TSD-SR diffusion refinement:
 
 ```python
-from src.models import CompleteEnhancedFusionSR
+from src.models import create_inference_pipeline
 
-model = CompleteEnhancedFusionSR(
-    expert_ensemble=experts,        # ExpertEnsemble or None (cached mode)
-    num_experts=3,                  # Number of expert models
-    num_bands=3,                    # Frequency bands for routing
-    block_size=8,                   # DCT block size
-    upscale=4,                      # Upscaling factor
-
-    # Capacity parameters (Phase 1 Scale-Up)
-    fusion_dim=64,                  # Base fusion dimension (was 32)
-    num_heads=4,                    # Attention heads (Phase 3/4)
-    refine_depth=4,                 # Refinement network layers
-    refine_channels=64,             # Refinement network width
-
-    # Feature flags
-    enable_hierarchical=True,       # Phase 5: progressive fusion (+0.25 dB)
-    enable_multi_domain_freq=False, # Phase 2: 9-band DCT+DWT+FFT
-    enable_lka=False,               # Phase 3/4: Large Kernel Attention
-    enable_edge_enhance=False,      # Phase 7: Laplacian edge enhancement
-
-    # Improvement toggles
-    enable_dynamic_selection=True,  # Phase 6: per-pixel gating (+0.3 dB)
-    enable_cross_band_attn=True,    # Phase 3: frequency band attention (+0.2 dB)
-    enable_adaptive_bands=True,     # Phase 2: adaptive DCT splits (+0.15 dB)
-    enable_multi_resolution=True,   # Phase 5: multi-res fusion (+0.25 dB)
-    enable_collaborative=True,      # Phase 4: cross-expert learning (+0.2 dB)
-)
-```
-
-**Parameter Count**: ~900K trainable (fusion + refinement) + ~120M frozen (experts)
-
-### CompleteSRPipeline (Track A + Track B)
-
-End-to-end pipeline integrating fusion + TSD-SR diffusion:
-
-```python
-from src.models import CompleteSRPipeline
-
-pipeline = CompleteSRPipeline(
-    expert_ensemble=experts,
+# Creates full 7-phase + TSD-SR pipeline
+model = create_inference_pipeline(
+    expert_ensemble=expert_ensemble,
     tsdsr_student_path="pretrained/tsdsr/transformer.safetensors",
-    tsdsr_teacher_path="pretrained/teacher/teacher.safetensors",
     tsdsr_vae_path="pretrained/tsdsr/vae.safetensors",
-    enable_all_improvements=True,
-    enable_tsdsr=True,             # Enable diffusion refinement
-    tsdsr_inference_steps=1,       # 1=student (fast), 20=teacher (quality)
+    device='cuda'
 )
-```
 
-### TSD-SR Diffusion (Track B)
-
-Target Score Distillation for perceptual enhancement:
-
-```
-Fusion SR Output → VAE Encoder → Latent → DiT Denoising → VAE Decoder → Refined Output
-
-DiT Architecture:
-├── Patch Embedding (latent → tokens)
-├── Transformer Blocks ×12
-│   ├── AdaLN (time-step conditioning)
-│   ├── Multi-Head Self-Attention
-│   └── Feed-Forward Network
-└── Unpatchify (tokens → latent)
-```
-
-| Variant | Steps | Speed | Quality |
-|---------|-------|-------|---------|
-| **Teacher** | 20 | ~500ms | Highest perceptual quality |
-| **Student** | 1 | ~12ms | 40× faster, slight quality trade-off |
-
-### Cached Training Mode
-
-When training with cached features, the model receives pre-computed expert outputs:
-
-```python
-# CachedSRDataset loads from disk:
-# - lr_input:        [3, H, W]    Original LR image
-# - expert_outputs:  Dict[str, Tensor]  HAT/DAT/NAFNet SR outputs
-# - expert_features: Dict[str, Tensor]  Intermediate features
-# - hr_target:       [3, 4H, 4W]  Ground truth HR
-
-# Model uses forward_with_precomputed() — skipping Phase 1 entirely
-output = model.forward_with_precomputed(
-    lr_input=lr,
-    expert_outputs={"hat": hat_sr, "dat": dat_sr, "nafnet": nafnet_sr},
-    expert_features={"hat": hat_feat, "dat": dat_feat, "nafnet": nafnet_feat}
-)
+with torch.no_grad():
+    sr_perceptual = model(lr_tensor)
 ```
 
 ---
 
-## 📈 Results
+## Loss Functions
 
-### Track A — Restoration Quality (PSNR dB)
+**File:** `src/losses/perceptual_loss.py`
 
-| Model | Set5 | Set14 | BSD100 | Urban100 | DF2K-Val |
-|-------|------|-------|--------|----------|----------|
-| Bicubic | 28.42 | 26.00 | 25.96 | 23.14 | 27.50 |
-| HAT-L | 33.04 | 29.23 | 28.00 | 27.97 | 32.80 |
-| MambaIR/DAT | 32.92 | 29.11 | 27.89 | 27.68 | 32.65 |
-| **Ours (Fusion)** | **33.50** | **29.65** | **28.25** | **28.45** | **34.00** |
+The `CombinedLoss` class manages 8 loss functions with configurable weights:
 
-### Track B — Perceptual Quality Score
+| Loss | Class | Description |
+|------|-------|-------------|
+| **L1** | `L1Loss` | Pixel-wise absolute error (primary PSNR loss) |
+| **Charbonnier** | `CharbonnierLoss` | Smooth L1 variant: `√(x² + ε²)`, ε=1e-6 |
+| **SSIM** | `SSIMLoss` | Structural similarity (1 - SSIM), window=11 |
+| **VGG Perceptual** | `VGGPerceptualLoss` | Feature matching at relu2_2, relu3_4, relu4_4 |
+| **SWT Frequency** | `SWTFrequencyLoss` | Stationary Wavelet Transform L1 on subbands (db4, 3 levels) |
+| **FFT Frequency** | `FFTFrequencyLoss` | Frequency-domain L1 on log-magnitude spectrum |
+| **Edge** | `EdgeLoss` | Sobel-filtered edge map L1 |
+| **CLIP Semantic** | `CLIPSemanticLoss` | CLIP feature-space cosine similarity |
 
-| Model | LPIPS ↓ | CLIP-IQA ↑ | MANIQA ↑ | Score ↑ |
-|-------|---------|------------|----------|---------|
-| Baseline Fusion | 0.142 | 0.72 | 0.68 | 4.12 |
-| + TSD Teacher (20 steps) | 0.098 | 0.81 | 0.76 | 4.85 |
-| + TSD Student (1 step) | 0.105 | 0.79 | 0.74 | 4.71 |
+The SWT loss uses GPU approximation when PyWavelets is unavailable, falling back to Haar wavelet convolutions.
 
 ---
 
-## ⚙️ Configuration Reference
+## Data Pipeline
 
-### Full Configuration (`configs/train_config.yaml`)
+### Dataset Classes
+
+| Class | File | Purpose |
+|-------|------|---------|
+| `SRDataset` | `dataset.py` | Base dataset for pre-generated LR-HR pairs |
+| `DF2KDataset` | `dataset.py` | DF2K-specific with auto directory detection |
+| `ValidationDataset` | `dataset.py` | Full-image loading (no patching) for evaluation |
+| `CachedSRDataset` | `cached_dataset.py` | Loads pre-computed expert features from disk |
+
+### Augmentations
+
+**File:** `src/data/augmentations.py` — `SRTrainAugmentation` pipeline
+
+All augmentations are applied identically to both LR and HR images to maintain alignment:
+
+| Augmentation | Class | Default Config |
+|-------------|-------|---------------|
+| **Random Crop** | `PairedRandomCrop` | 64×64 LR → 256×256 HR |
+| **Random Flip** | `PairedRandomFlip` | p=0.5 horizontal + vertical |
+| **Random Rotation** | `PairedRandomRotation` | p=0.5, angles: {90°, 180°, 270°} |
+| **Color Jitter** | `ColorJitter` | p=0.2, brightness/contrast/saturation=0.05 |
+| **Gaussian Blur** | `GaussianBlur` | Optional, kernel={3,5} |
+| **Random Crop Scale** | — | Scale range [0.9, 1.1] |
+
+CutBlur and Mixup augmentations are available but disabled by default.
+
+---
+
+## Evaluation Metrics
+
+**File:** `src/utils/metrics.py`
+
+| Metric | Function | Description |
+|--------|----------|-------------|
+| **PSNR** | `calculate_psnr()` | Peak Signal-to-Noise Ratio (Y channel, 4px border crop) |
+| **SSIM** | `calculate_ssim()` | Structural Similarity (GPU-accelerated, Gaussian window σ=1.5) |
+| **LPIPS** | `LPIPSCalculator` | Learned Perceptual Image Patch Similarity (AlexNet backbone) |
+
+The `MetricCalculator` class provides thread-safe running average tracking during training. RGB-to-Y conversion uses the ITU-R BT.601 standard.
+
+---
+
+## Model Details
+
+### Parameter Counts
+
+| Component | Parameters | Trainable |
+|-----------|-----------|-----------|
+| HAT-L Expert | ~40.85M | ❌ Frozen |
+| DRCT-L Expert | ~27.58M | ❌ Frozen |
+| GRL-B Expert | ~20.20M | ❌ Frozen |
+| EDSR-L Expert | ~43.09M | ❌ Frozen |
+| **Total Frozen** | **~131.72M** | — |
+| Frequency Decomposition (Phase 2) | ~50K | ✅ |
+| Cross-Band Attention + LKA (Phase 3) | ~200K | ✅ |
+| Collaborative Learning + LKA (Phase 4) | ~300K | ✅ |
+| Hierarchical Fusion (Phase 5) | ~150K | ✅ |
+| Dynamic Expert Selection (Phase 6) | ~10K | ✅ |
+| Deep Refinement (Phase 7a) | ~400K | ✅ |
+| Edge Enhancement (Phase 7b) | ~30K | ✅ |
+| Routing + Misc | ~60K | ✅ |
+| **Total Trainable** | **~1.2M** | — |
+
+### Key Design Decisions
+
+1. **Frozen experts** — Leverages pre-trained SOTA models without fine-tuning, focusing all trainable capacity on intelligent fusion
+2. **Frequency-domain guidance** — DCT+DWT+FFT decomposition provides richer signal representation than spatial-only approaches
+3. **Decomposed LKA (k=21)** — Achieves a 21×21 receptive field with O(k) parameters instead of O(k²), enabling global context without excessive computation
+4. **Per-pixel difficulty gating** — Adaptively allocates expert computation based on local image complexity
+5. **Cached training** — Pre-computing frozen expert outputs enables 10-20× training speedup
+6. **3-stage loss scheduling** — Curriculum-based loss progression prevents early-stage conflict between PSNR and perceptual objectives
+
+### Checkpoint Management
+
+**File:** `src/utils/checkpoint_manager.py` — `CheckpointManager` class
+
+- **Atomic saves** — Writes to temp file first, then renames (prevents corruption on crash)
+- **Best-K tracking** — Keeps top 5 checkpoints by PSNR
+- **Last-N retention** — Keeps last 10 checkpoints regardless of quality
+- **Milestone preservation** — Saves epochs 50, 100, 150, 200 permanently
+
+### EMA (Exponential Moving Average)
+
+**File:** `src/utils/checkpoint_manager.py` — `EMAModel` class
+
+- Maintains shadow copies of all trainable parameters
+- Updates every training step with decay=0.9995
+- Applied during validation for smoother, more stable predictions
+- Checkpoint saves include EMA state for consistent resumption
+
+---
+
+## Configuration Reference
+
+The complete configuration is in `configs/train_config.yaml`. Key sections:
+
+<details>
+<summary><strong>Model Configuration</strong></summary>
 
 ```yaml
-# ── Model ──────────────────────────────────────────────────────────
 model:
   type: "CompleteEnhancedFusionSR"
   scale: 4
-
   experts:
-    - name: "HAT"
-      weight_path: "pretrained/HAT-L_SRx4_ImageNet-pretrain.pth"
-      frozen: true
-      architecture:
-        type: "HAT-L"
-        embed_dim: 180
-        depths: [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
-        num_heads: [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
-        window_size: 16
-        compress_ratio: 3
-        squeeze_factor: 30
-        conv_scale: 0.01
-        overlap_ratio: 0.5
-
-    - name: "DAT"
-      weight_path: "pretrained/DAT_x4.pth"
-      frozen: true
-
-    - name: "NAFNet"
-      weight_path: "pretrained/NAFNet-RSTB-x4.pth"
-      frozen: true
-
+    - name: "HAT"        # HAT-L: embed_dim=180, depths=[6]×12, window=16
+    - name: "DRCT"       # DRCT-L: embed_dim=180, depths=[6]×12, window=16
+    - name: "GRL"        # GRL-B: embed_dim=180, depths=[4,4,8,8,4,4], window=8
+    - name: "EDSR"       # EDSR-L: num_feat=256, num_block=32
   fusion:
-    num_experts: 3
-    fusion_dim: 64
-    num_heads: 4
-    refine_depth: 4
-    refine_channels: 64
+    num_experts: 4
+    fusion_dim: 128
+    refine_channels: 128
+    refine_depth: 6
+    base_channels: 64
     improvements:
-      dynamic_expert_selection: true    # Phase 6
-      cross_band_attention: true        # Phase 3
-      adaptive_frequency_bands: true    # Phase 2
-      multi_resolution_fusion: true     # Phase 5
-      collaborative_learning: true      # Phase 4
+      dynamic_expert_selection: true
+      cross_band_attention: true
+      adaptive_frequency_bands: true
+      multi_resolution_fusion: true
+      collaborative_learning: true
+      edge_enhancement: true
+```
+</details>
 
-# ── Training ───────────────────────────────────────────────────────
-training:
-  total_epochs: 200
-  batch_size: 16
-  learning_rate: 2.0e-4
-  weight_decay: 0.0
+<details>
+<summary><strong>Loss Configuration</strong></summary>
 
-  optimizer:
-    type: "AdamW"
-    betas: [0.9, 0.99]
-
-  scheduler:
-    type: "CosineAnnealingLR"
-    T_max: 200
-    eta_min: 1.0e-7
-
-  warmup_epochs: 5
-  warmup_lr: 1.0e-6
-  gradient_clip: 1.0
-
-  ema:
-    enabled: true
-    decay: 0.999
-
-# ── Loss (3-stage scheduling) ─────────────────────────────────────
+```yaml
 loss:
   stages:
-    - name: "pixel_focus"
-      epochs: [0, 50]
-      weights: { l1: 1.0, charb: 0.5 }
-    - name: "frequency_aware"
-      epochs: [50, 100]
-      weights: { l1: 0.8, swt: 0.1, fft: 0.1 }
-    - name: "perceptual_refine"
-      epochs: [100, 200]
-      weights: { l1: 0.5, vgg: 0.2, ssim: 0.2, swt: 0.1 }
+    - epochs: [0, 80]      # Stage 1: L1=1.0
+    - epochs: [80, 150]    # Stage 2: L1=0.75, SWT=0.20, FFT=0.05
+    - epochs: [150, 200]   # Stage 3: L1=0.60, SWT=0.25, FFT=0.10, SSIM=0.05
+  swt:
+    levels: 3
+    wavelet: "db4"
+  fft:
+    loss_type: "l1"
+    log_scale: true
+  ssim:
+    window_size: 11
+```
+</details>
 
-# ── Data ───────────────────────────────────────────────────────────
-data:
-  train_hr_dir: "data/DF2K/train_HR"
-  train_lr_dir: "data/DF2K/train_LR"
-  val_hr_dir: "data/DF2K/val_HR"
-  val_lr_dir: "data/DF2K/val_LR"
-  lr_patch_size: 64
-  scale: 4
-  repeat_factor: 20
+<details>
+<summary><strong>Hardware & Training</strong></summary>
 
-  augmentation:
-    horizontal_flip: true
-    vertical_flip: true
-    rotation: true
-    color_jitter: true
-    mixup: true
+```yaml
+training:
+  total_epochs: 200
+  batch_size: 32
+  precision: "fp16"
+  gradient_clip: 1.0
+  optimizer:
+    type: "AdamW"
+    lr: 1.0e-4
+    weight_decay: 1.0e-4
+  scheduler:
+    type: "CosineAnnealingWarmRestarts"
+    T_0: 50
+    T_mult: 2
+    warmup_epochs: 5
+  ema:
+    decay: 0.9995
 
-# ── Hardware ───────────────────────────────────────────────────────
 hardware:
   gpu_ids: [0]
-  num_workers: 8
-  precision: "fp32"
+  cudnn_benchmark: true
+
+seed: 42
 ```
+</details>
+
+<details>
+<summary><strong>Dataset & Augmentation</strong></summary>
+
+```yaml
+dataset:
+  train:
+    root: "dataset/DF2K"
+    hr_subdir: "train_HR"
+    lr_subdir: "train_LR"
+  lr_patch_size: 64
+  scale: 4
+  augmentation:
+    use_flip: true
+    use_rotation: true
+    use_color_jitter: true
+    color_jitter_prob: 0.2
+    use_random_crop_scale: true
+    crop_scale_range: [0.9, 1.1]
+  repeat_factor: 20
+```
+</details>
 
 ---
 
-## 🔍 Troubleshooting
+## Troubleshooting
 
 ### Common Issues
 
-**1. CUDA Out of Memory**
-```bash
-# Reduce batch size
-python train.py --config configs/train_config.yaml --batch_size 8
+| Issue | Solution |
+|-------|----------|
+| **CUDA OOM during training** | Reduce `batch_size` to 16 or 8; enable `use_amp: true` |
+| **Expert weights fail to load** | Verify weight file paths in config match actual files in `pretrained/` |
+| **Slow training (>15s/batch)** | Use cached training mode (see [Cached Training](#cached-training-10-20-faster)) |
+| **NaN loss values** | Reduce `lr` to 5e-5; check gradient clipping is enabled |
+| **Channel mismatch in hierarchical fusion** | Ensure all 4 experts are loaded; check `num_experts=4` in config |
+| **Import errors** | Run from project root directory; ensure all `__init__.py` files exist |
+| **TSD-SR fails to load** | Install `diffusers>=0.21.0` and `safetensors>=0.3.0` |
 
-# Or use cached training mode to skip loading expert models
-python train.py --config configs/train_config.yaml --cached
-```
+### Memory Optimization Tips
 
-**2. VGG Feature Extractor Download Error**
-```bash
-# Pre-download VGG19 weights
-python -c "import torchvision; torchvision.models.vgg19(weights='IMAGENET1K_V1')"
-```
-
-**3. Missing PyWavelets for SWT Loss**
-```bash
-pip install PyWavelets
-# If unavailable, SWTLoss falls back to GPU-approximated wavelet convolutions
-```
-
-**4. HAT/DAT Parameter Mismatch When Loading**
-```
-# The ExpertEnsemble uses strict=False loading with detailed mismatch reporting.
-# Common cause: mismatched DAT architecture config (1306/1936 params loaded).
-# Ensure pretrained weights match the architecture spec in train_config.yaml.
-```
-
-**5. NaN Loss During Training**
-```yaml
-# Use FP32 precision — HAT attention layers can be unstable in FP16
-hardware:
-  precision: "fp32"
-
-# Also verify gradient clipping is enabled
-training:
-  gradient_clip: 1.0
-```
-
-**6. Slow Training (15+ sec/batch)**
-```bash
-# Use cached training mode (10-20× faster)
-python scripts/extract_features_balanced.py --output_dir data/cached
-python train.py --config configs/train_config.yaml --cached --cache_dir data/cached
-
-# Or enable multi-GPU expert distribution
-hardware:
-  gpu_ids: [0, 1]  # HAT on GPU 0, DAT+NAFNet on GPU 1
-```
-
-**7. NAFNet Feature Extraction Returns None**
-```
-# Ensure hooks are registered on the correct NAFNet layers.
-# The encoder output should produce [B, 64, H, W] features.
-# Check that expert_loader.py registers hooks via _register_hooks().
-```
+1. **Use cached training** — Reduces VRAM from ~24GB to ~8GB by skipping live expert inference
+2. **Enable AMP** — `precision: "fp16"` halves memory for activations
+3. **Reduce patch size** — Lower `lr_patch_size` from 64 to 48
+4. **Gradient accumulation** — Set `accumulation_steps: 2` to simulate larger batches
 
 ---
 
-## 📚 Citation
-
-If you use this code, please cite:
+## Citation
 
 ```bibtex
-@inproceedings{ntire2025sr,
-  title={Championship SR: Multi-Expert Fusion with Frequency-Aware
-         Hierarchical Processing for Image Super-Resolution},
-  author={Nikhil Pathak},
-  booktitle={CVPR Workshops},
-  year={2025}
-}
-```
-
-### Related Works
-
-```bibtex
-@inproceedings{chen2023hat,
-  title={Activating More Pixels in Image Super-Resolution Transformer},
-  author={Chen, Xiangyu and Wang, Xintao and Zhou, Jianyi and Qiao, Yu and Dong, Chao},
-  booktitle={CVPR},
-  year={2023}
-}
-
-@article{guo2024mambair,
-  title={MambaIR: A Simple Baseline for Image Restoration with State-Space Model},
-  author={Guo, Hang and Li, Jinmin and Dai, Tao and Ouyang, Zhihao and Ren, Xudong and Xia, Shutao},
-  journal={arXiv preprint arXiv:2402.15648},
-  year={2024}
-}
-
-@inproceedings{chen2022nafnet,
-  title={Simple Baselines for Image Restoration},
-  author={Chen, Liangyu and Chu, Xiaojie and Zhang, Xiangyu and Sun, Jian},
-  booktitle={ECCV},
-  year={2022}
-}
-
-@inproceedings{wu2024tsdsr,
-  title={One Step Diffusion via Shortcut Models},
-  author={Wu, Kevin and others},
-  booktitle={arXiv preprint},
-  year={2024}
+@inproceedings{championshipsr2026,
+  title={Championship Super-Resolution: Multi-Expert Fusion with Frequency-Guided Adaptive Selection},
+  author={Nikhil AI Labs},
+  booktitle={NTIRE 2026 Workshop, CVPR},
+  year={2026}
 }
 ```
 
 ---
 
-## 📄 License
+## Acknowledgments
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+This project builds upon several outstanding works in image super-resolution:
 
----
-
-## 🙏 Acknowledgments
-
-- [HAT](https://github.com/XPixelGroup/HAT) — Hybrid Attention Transformer for Image Super-Resolution
-- [MambaIR](https://github.com/csguoh/MambaIR) — State-Space Model for Image Restoration
-- [NAFNet](https://github.com/megvii-research/NAFNet) — Nonlinear Activation Free Network
-- [TSD-SR](https://github.com/Microtreei/TSD-SR) — Target Score Distillation for Super-Resolution
-- [NTIRE 2025 Challenge](https://www.ntire-challenge.org/) — Competition organizers and benchmark
-- [PyIQA](https://github.com/chaofengc/IQA-PyTorch) — Perceptual image quality assessment toolkit
+- **[HAT](https://github.com/XPixelGroup/HAT)** — Hybrid Attention Transformer (Chen et al., 2023)
+- **[DRCT](https://github.com/ming053l/DRCT)** — Dense Residual Connected Transformer
+- **[GRL](https://github.com/ofsoundof/GRL-Image-Restoration)** — Global-Regional-Local Image Restoration (Li et al., CVPR 2023)
+- **[EDSR](https://github.com/sanghyun-son/EDSR-PyTorch)** — Enhanced Deep Residual SR (Lim et al., 2017)
+- **[TSD-SR](https://github.com/Microtreei/TSD-SR)** — Target Score Distillation for SR
+- **[NTIRE Challenge](https://www.cvlibs.net/workshops/ntire2026/)** — Image Restoration Challenge
 
 ---
 
-<p align="center">
-  <b>🏆 Championship SR — Built for NTIRE 2025 🏆</b>
-</p>
+<div align="center">
+
+**Built with ❤️ by [Nikhil AI Labs](https://github.com/Nikhil-AI-Labs)**
+
+*Championship SR — Pushing the boundaries of image super-resolution*
+
+</div>
