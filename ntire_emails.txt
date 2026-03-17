@@ -1,0 +1,32 @@
+Subject: NTIRE 2026 Image Super-Resolution (x4) Challenge - Anant_SVNIT - TEAM 29 - Final Submission
+To: zhengchen.cse@gmail.com, normal.kliu@gmail.com, jingkaiwang100@gmail.com, g1017325431@gmail.com, jiatong.li2024@gmail.com, mon3tr@sjtu.edu.cn, labor030073@gmail.com, zzh_qwq@sjtu.edu.cn, yanxianglong@sjtu.edu.cn, zhangziqing@sjtu.edu.cn
+CC: Radu.Timofte@uni-wuerzburg.de, yulun100@gmail.com
+Body:
+Dear NTIRE 2026 Challenge Organizers,
+
+I hope this email finds you well. I am writing to submit the final materials for our participation in the NTIRE 2026 Image Super-Resolution (x4) Challenge.
+
+Here are our team details:
+
+a) Team Name: Anant_SVNIT
+b) Team Leader: Nikhil Pathak (u24ec012@eced.svnit.ac.in)
+c) Team Members: Milan Kumar Singh, Aagam Jain, Kishor Upla, Raghavendra Ramachandra, Vivek, Sarang
+d) Codabench Username: nikhil-ai
+e) Code and Pre-trained Model: https://github.com/Nikhil-AI-Labs/Image-Super-Resolution
+   To download: git clone https://github.com/Nikhil-AI-Labs/Image-Super-Resolution.git
+f) Results download link: https://drive.google.com/file/d/12JvYplsdrfqzgBLFceQdfiLQWy5dC-91/view?usp=sharing
+
+I have attached the following to this email:
+  1. Compiled factsheet (PDF)
+  2. Factsheet source files (.tex and .bib)
+
+Our method, "Championship SR," is a multi-expert fusion approach that combines four frozen pre-trained SR models (DRCT-L, GRL-B, NAFNet-64, and MambaIR) through a lightweight trainable fusion network (~1.2M parameters). The fusion is guided by a 9-band multi-domain frequency decomposition (DCT + DWT + FFT) and uses hierarchical attention with large kernel attention (k=21) for global spatial context. We also use a difficulty-adaptive gating mechanism that dynamically routes expert contributions based on local image complexity.
+
+Please let me know if you need any additional information or if there are any issues with the submission.
+
+Thank you for organizing this challenge — it has been a great experience working on it.
+
+Best regards,
+Nikhil Pathak
+Sardar Vallabhbhai National Institute of Technology (SVNIT), Surat, India
+u24ec012@eced.svnit.ac.in

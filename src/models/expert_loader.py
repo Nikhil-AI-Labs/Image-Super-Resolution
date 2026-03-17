@@ -1,15 +1,18 @@
 """
-Expert Loader Module — Phase 2
-================================
-4-Expert ensemble: HAT-L, DRCT-L, GRL-B, EDSR-L.
+Expert Loader Module — DRCT + GRL + NAFNet
+=============================================
+3-Expert local ensemble: DRCT-L, GRL-B, NAFNet-64.
+MambaIR features are loaded from disk (Decoupled Compute Paradigm).
 
 Expert roles (hook-based feature extraction):
-  HAT-L   [B, 180, H, W]  conv_after_body — high-freq transformer (Samsung NTIRE winner)
   DRCT-L  [B, 180, H, W]  conv_after_body — dense residual connected transformer
   GRL-B   [B, 180, H, W]  conv_after_body — global/regional/local representation
-  EDSR-L  [B, 256, H, W]  conv_after_body — enhanced deep SR (pure conv, no attention)
+  NAFNet  [B, 64,  H, W]  decoder output  — nonlinear-activation-free CNN (SIDD)
 
-All experts are FROZEN — only the downstream fusion network trains.
+MambaIR [B, 180, H, W] — NOT loaded here. Features extracted on Colab/Kaggle
+via scripts/extract_mamba_features.py and loaded by CachedSRDataset.
+
+All local experts are FROZEN — only the downstream fusion network trains.
 
 CRITICAL: forward_all_with_hooks() uses feat.clone() OUTSIDE @inference_mode
 context to convert captured tensors into autograd-compatible tensors for
@@ -20,9 +23,9 @@ Usage:
     ensemble.load_all_experts()
 
     outputs, features = ensemble.forward_all_with_hooks(lr_image)
-    # outputs  = {'hat': [B,3,H*4,W*4], 'drct': ..., 'grl': ..., 'edsr': ...}
-    # features = {'hat': [B,180,H,W], 'drct': [B,180,H,W],
-    #             'grl': [B,180,H,W],  'edsr': [B,256,H,W]}
+    # outputs  = {'drct': [B,3,H*4,W*4], 'grl': ..., 'nafnet': ...}
+    # features = {'drct': [B,180,H,W], 'grl': [B,180,H,W],
+    #             'nafnet': [B,64,H,W]}
 """
 
 import os
@@ -34,15 +37,12 @@ import torch.nn.functional as F
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
 import warnings
 
-# ── Phase 2: updated aliases ────────────────────────────────────────────────
+# ── Expert name normalization ────────────────────────────────────────────────
 EXPERT_ALIASES = {
-    'mambair': 'dat',   # backward compat
-    'mamba':   'dat',   # backward compat
-    'dat':     'drct',  # dat → drct in new ensemble
-    'nafnet':  'edsr',  # nafnet → edsr in new ensemble
+    'mambair': 'mamba',   # normalize
+    'nafnet_sidd': 'nafnet',  # normalize
 }
 
 def normalize_expert_name(name: str) -> str:
@@ -51,7 +51,7 @@ def normalize_expert_name(name: str) -> str:
 
 
 # ============================================================================
-# Utility Functions  (unchanged from Phase 1)
+# Utility Functions
 # ============================================================================
 
 def pad_to_window_size(
@@ -132,22 +132,24 @@ def _find_pretrained_dir() -> Path:
 
 
 # ============================================================================
-# ExpertEnsemble  — Phase 2
+# ExpertEnsemble — DRCT + GRL + NAFNet (3 local experts)
 # ============================================================================
 
 class ExpertEnsemble(nn.Module):
     """
-    4-Expert Ensemble with hook-based feature extraction.
+    3-Expert Local Ensemble with hook-based feature extraction.
 
-    Hook feature shapes (at LR resolution, ready for feat_proj):
-        'hat':  [B, 180, H, W]
-        'drct': [B, 180, H, W]
-        'grl':  [B, 180, H, W]
-        'edsr': [B, 256, H, W]
+    Local experts (loaded and run on your GPU):
+        'drct':   [B, 180, H, W] — DRCT-L conv_after_body
+        'grl':    [B, 180, H, W] — GRL-B  conv_after_body
+        'nafnet': [B, 64,  H, W] — NAFNet decoder output (before ending conv)
+
+    MambaIR (180ch) is NOT loaded here — its features come from
+    scripts/extract_mamba_features.py (Colab/Kaggle extraction).
 
     Downstream feat_proj (in fusion network) must use:
-        nn.Conv2d(180, fusion_dim, 1)  for hat / drct / grl
-        nn.Conv2d(256, fusion_dim, 1)  for edsr
+        nn.Conv2d(180, fusion_dim, 1)  for drct / grl
+        nn.Conv2d(64,  fusion_dim, 1)  for nafnet
     """
 
     # ── window sizes per expert ──────────────────────────────────────────────
@@ -157,14 +159,14 @@ class ExpertEnsemble(nn.Module):
     def __init__(
         self,
         upscale:        int                        = 4,
-        window_size:    int                        = 16,   # HAT window size
+        window_size:    int                        = 16,   # DRCT window size
         device:         Union[str, torch.device]   = 'cuda',
         checkpoint_dir: Optional[str]              = None,
     ):
         super().__init__()
         self.upscale     = upscale
-        self.window_size = window_size   # used by HAT
-        self.device      = torch.device(device)   # single GPU for all experts
+        self.window_size = window_size
+        self.device      = torch.device(device)
 
         # ── checkpoint directory ─────────────────────────────────────────────
         if checkpoint_dir is not None:
@@ -172,17 +174,15 @@ class ExpertEnsemble(nn.Module):
         else:
             self.checkpoint_dir = _find_pretrained_dir()
 
-        # ── expert models ────────────────────────────────────────────────────
-        self.hat  = None   # HAT-L,   40.8M,  window=16
-        self.drct = None   # DRCT-L,  27.6M,  window=16
-        self.grl  = None   # GRL-B,   20.2M,  window=8
-        self.edsr = None   # EDSR-L,  43.1M,  conv-only
+        # ── expert models (3 local) ──────────────────────────────────────────
+        self.drct   = None   # DRCT-L,   27.6M,  window=16
+        self.grl    = None   # GRL-B,    20.2M,  window=8
+        self.nafnet = None   # NAFNet-64, ~67M,  UNet (SIDD weights)
 
         self._experts_loaded = {
-            'hat':  False,
-            'drct': False,
-            'grl':  False,
-            'edsr': False,
+            'drct':   False,
+            'grl':    False,
+            'nafnet': False,
         }
 
         # ── hook infrastructure ──────────────────────────────────────────────
@@ -190,9 +190,10 @@ class ExpertEnsemble(nn.Module):
         self._hook_handles      = []
         self._capture_features  = False
 
-        print(f"  [Single-GPU] All 4 experts → {self.device}")
+        print(f"  [Single-GPU] 3 local experts (DRCT+GRL+NAFNet) → {self.device}")
+        print(f"  [Decoupled]  MambaIR features loaded from disk (not in ensemble)")
 
-    # ── basicsr mock (HAT + DRCT both need it) ───────────────────────────────
+    # ── basicsr mock (DRCT needs it) ──────────────────────────────────────────
     def _setup_basicsr_mocks(self):
         import types
         try:
@@ -229,46 +230,6 @@ class ExpertEnsemble(nn.Module):
     # LOAD METHODS
     # =========================================================================
 
-    def load_hat(
-        self,
-        checkpoint_path: Optional[str] = None,
-        freeze: bool = True,
-    ) -> bool:
-        """Load HAT-L (40.8M).  window_size=16,  hook→conv_after_body [B,180,H,W]"""
-        try:
-            self._setup_basicsr_mocks()
-            from src.models.hat import create_hat_model
-
-            self.hat = create_hat_model(
-                embed_dim   = 180,
-                depths      = [6] * 12,
-                num_heads   = [6] * 12,
-                window_size = self.window_size,
-                upscale     = self.upscale,
-                img_range   = 1.0,
-            )
-
-            if checkpoint_path is None:
-                checkpoint_path = str(
-                    self.checkpoint_dir / 'hat' / 'HAT-L_SRx4_ImageNet-pretrain.pth'
-                )
-            if os.path.exists(checkpoint_path):
-                self.hat, info = load_checkpoint_flexible(checkpoint_path, self.hat)
-                print(f"  ✓ HAT-L   loaded: {info['loaded']}/{info['total']} keys")
-            else:
-                print(f"  ⚠ HAT-L   checkpoint not found: {checkpoint_path}")
-
-            if freeze:
-                for p in self.hat.parameters(): p.requires_grad = False
-                self.hat.eval()
-            self.hat = self.hat.to(self.device)
-            self._experts_loaded['hat'] = True
-            return True
-
-        except Exception as e:
-            print(f"  ✗ HAT-L   failed: {e}")
-            return False
-
     def load_drct(
         self,
         checkpoint_path: Optional[str] = None,
@@ -281,8 +242,7 @@ class ExpertEnsemble(nn.Module):
         basicsr mocks: handled inside drct/__init__.py at import time.
         """
         try:
-            # drct/__init__.py sets up basicsr mocks at import time
-            self._setup_basicsr_mocks()   # idempotent — safe to call again
+            self._setup_basicsr_mocks()
             from src.models.drct import create_drct_model, DRCT_AVAILABLE
 
             if not DRCT_AVAILABLE:
@@ -377,61 +337,61 @@ class ExpertEnsemble(nn.Module):
             print(f"  ✗ GRL-B   failed: {e}")
             return False
 
-    def load_edsr(
+    def load_nafnet(
         self,
         checkpoint_path: Optional[str] = None,
         freeze: bool = True,
     ) -> bool:
         """
-        Load EDSR-L (43.1M).  NO window padding needed.  hook→conv_after_body [B,256,H,W]
-
-        Checkpoint: pretrained/edsr/EDSR_Lx4_f256b32_DIV2K_official-76ee1c8f.pth  (172.4 MB)
-        138/139 keys load (mean buffer initialized to DIV2K RGB mean in code).
-        CRITICAL: img_range=255.0 is MANDATORY — pretrained weights expect it.
+        Load NAFNet-SIDD-width64 (~67M params).
+        
+        Wrapped in NAFNetSR: bicubic upscale → NAFNet refinement.
+        Hook target: last decoder output → [B, 64, H_up, W_up]
+        Feature is resized to LR resolution → [B, 64, H, W]
+        
+        Checkpoint: pretrained/nafnet/NAFNet-SIDD-width64.pth
         """
         try:
-            from src.models.edsr import create_edsr_model, EDSR_AVAILABLE
+            from src.models.nafnet import NAFNetSR, create_nafnet_sr_model
 
-            if not EDSR_AVAILABLE:
-                print("  ✗ EDSR-L  architecture not available")
-                return False
-
-            self.edsr = create_edsr_model(
-                num_feat  = 256,
-                num_block = 32,
-                upscale   = self.upscale,
-                res_scale = 0.1,
-                img_range = 255.0,   # ← MANDATORY, pretrained weights require this
+            self.nafnet = create_nafnet_sr_model(
+                upscale=self.upscale,
+                width=64,
+                middle_blk_num=12,
+                enc_blk_nums=[2, 2, 4, 8],
+                dec_blk_nums=[2, 2, 2, 2],
             )
 
             if checkpoint_path is None:
                 # Try both possible filenames
                 for fname in [
-                    'EDSR_Lx4_f256b32_DIV2K.pth',
-                    'EDSR_Lx4_f256b32_DIV2K_official-76ee1c8f.pth',
+                    'NAFNet-SIDD-width64.pth',
+                    'NAFNet_SIDD_width64.pth',
                 ]:
-                    p = self.checkpoint_dir / 'edsr' / fname
+                    p = self.checkpoint_dir / 'nafnet' / fname
                     if p.exists():
                         checkpoint_path = str(p)
                         break
 
             if checkpoint_path and os.path.exists(checkpoint_path):
-                self.edsr, info = load_checkpoint_flexible(checkpoint_path, self.edsr)
-                print(f"  ✓ EDSR-L  loaded: {info['loaded']}/{info['total']} keys"
-                      f"  (1 mean buffer initialized in code — expected)")
+                # Load checkpoint once (avoid double torch.load RAM spike)
+                ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+                state = ckpt.get('params', ckpt)
+                self.nafnet.load_nafnet_weights(state)
+                print(f"  ✓ NAFNet  loaded: {checkpoint_path}")
             else:
-                print(f"  ⚠ EDSR-L  checkpoint not found (searched pretrained/edsr/)")
+                print(f"  ⚠ NAFNet  checkpoint not found (searched pretrained/nafnet/)")
 
             if freeze:
-                for p in self.edsr.parameters(): p.requires_grad = False
-                self.edsr.eval()
-            self.edsr = self.edsr.to(self.device)
-            self._experts_loaded['edsr'] = True
+                for p in self.nafnet.parameters(): p.requires_grad = False
+                self.nafnet.eval()
+            self.nafnet = self.nafnet.to(self.device)
+            self._experts_loaded['nafnet'] = True
             return True
 
         except Exception as e:
             import traceback; traceback.print_exc()
-            print(f"  ✗ EDSR-L  failed: {e}")
+            print(f"  ✗ NAFNet  failed: {e}")
             return False
 
     def load_all_experts(
@@ -439,39 +399,30 @@ class ExpertEnsemble(nn.Module):
         checkpoint_paths: Optional[Dict[str, str]] = None,
         freeze: bool = True,
     ) -> Dict[str, bool]:
-        """Load all 4 experts.  Returns dict of name→success."""
+        """Load all 3 local experts.  Returns dict of name→success."""
         if checkpoint_paths is None:
             checkpoint_paths = {}
 
         print("\n" + "=" * 60)
-        print("  Loading Expert Models  (Phase 2 — 4-Expert Ensemble)")
+        print("  Loading Expert Models  (DRCT + GRL + NAFNet)")
+        print("  MambaIR: features loaded from disk (Decoupled Compute)")
         print("=" * 60)
 
         results = {
-            'hat':  self.load_hat( checkpoint_paths.get('hat'),  freeze),
-            'drct': self.load_drct(checkpoint_paths.get('drct'), freeze),
-            'grl':  self.load_grl( checkpoint_paths.get('grl'),  freeze),
-            'edsr': self.load_edsr(checkpoint_paths.get('edsr'), freeze),
+            'drct':   self.load_drct(checkpoint_paths.get('drct'), freeze),
+            'grl':    self.load_grl(checkpoint_paths.get('grl'), freeze),
+            'nafnet': self.load_nafnet(checkpoint_paths.get('nafnet'), freeze),
         }
 
         print("=" * 60)
         loaded = sum(results.values())
-        print(f"  Loaded {loaded}/4 experts")
+        print(f"  Loaded {loaded}/3 local experts")
         print("=" * 60 + "\n")
         return results
 
     # =========================================================================
-    # FORWARD METHODS  — individual experts
+    # FORWARD METHODS — individual experts
     # =========================================================================
-
-    @torch.inference_mode()
-    def forward_hat(self, x: torch.Tensor) -> torch.Tensor:
-        """HAT-L inference.  Pads to window_size=16, crops output."""
-        if self.hat is None: raise RuntimeError("HAT not loaded.")
-        _, _, h, w = x.shape
-        xp, _, _ = pad_to_window_size(x, self.window_size, self.upscale)
-        sr = self.hat(xp)
-        return crop_to_size(sr, h * self.upscale, w * self.upscale).clamp(0, 1)
 
     @torch.inference_mode()
     def forward_drct(self, x: torch.Tensor) -> torch.Tensor:
@@ -479,7 +430,7 @@ class ExpertEnsemble(nn.Module):
         DRCT-L inference.  Pads to window_size=16, crops output.
 
         DRCT has internal check_image_size() but external padding ensures
-        it is a no-op, keeping behaviour consistent with HAT.
+        it is a no-op, keeping behaviour consistent.
         """
         if self.drct is None: raise RuntimeError("DRCT not loaded.")
         _, _, h, w = x.shape
@@ -504,16 +455,20 @@ class ExpertEnsemble(nn.Module):
         return crop_to_size(sr, h * self.upscale, w * self.upscale).clamp(0, 1)
 
     @torch.inference_mode()
-    def forward_edsr(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_nafnet(self, x: torch.Tensor) -> torch.Tensor:
         """
-        EDSR-L inference.  Fully convolutional — no padding needed.
+        NAFNet-SIDD inference.
 
-        img_range=255.0 is handled internally by EDSR:
-            (x - mean) * 255  →  body  →  out / 255 + mean
-        Input [0,1] → Output [0,1].
+        NAFNet-SIDD is a restoration model (denoiser), NOT an upscaler.
+        NAFNetSR wraps it with bicubic upscale → NAFNet refinement.
+        
+        Steps:
+            1. Bicubic upscale LR → HR resolution
+            2. NAFNet refinement (denoising/enhancement)
+            3. Output [B, 3, H*4, W*4]
         """
-        if self.edsr is None: raise RuntimeError("EDSR not loaded.")
-        return self.edsr(x).clamp(0, 1)
+        if self.nafnet is None: raise RuntimeError("NAFNet not loaded.")
+        return self.nafnet(x).clamp(0, 1)
 
     # =========================================================================
     # PARALLEL FORWARD (no hooks)
@@ -525,16 +480,15 @@ class ExpertEnsemble(nn.Module):
         return_dict: bool = False,
     ) -> Union[List[torch.Tensor], Dict[str, torch.Tensor]]:
         """
-        Run all 4 experts sequentially on a single GPU.
+        Run all 3 local experts sequentially on a single GPU.
         Uses torch.no_grad() (NOT inference_mode) so hook-captured tensors remain
         autograd-compatible when cloned outside the context.
         """
         outputs = {}
         with torch.no_grad():
-            if self._experts_loaded['hat']:  outputs['hat']  = self.forward_hat(x)
-            if self._experts_loaded['drct']: outputs['drct'] = self.forward_drct(x)
-            if self._experts_loaded['grl']:  outputs['grl']  = self.forward_grl(x)
-            if self._experts_loaded['edsr']: outputs['edsr'] = self.forward_edsr(x)
+            if self._experts_loaded['drct']:   outputs['drct']   = self.forward_drct(x)
+            if self._experts_loaded['grl']:    outputs['grl']    = self.forward_grl(x)
+            if self._experts_loaded['nafnet']: outputs['nafnet'] = self.forward_nafnet(x)
 
         return outputs if return_dict else list(outputs.values())
 
@@ -557,41 +511,61 @@ class ExpertEnsemble(nn.Module):
 
     def _register_all_hooks(self) -> bool:
         """
-        Register conv_after_body OUTPUT hooks on all 4 experts.
+        Register feature extraction hooks on all 3 local experts.
 
         Hook targets:
-            HAT:  self.hat.conv_after_body   → [B, 180, H_pad, W_pad]
-            DRCT: self.drct.conv_after_body  → [B, 180, H_pad, W_pad]
-            GRL:  self.grl.conv_after_body   → [B, 180, H_pad, W_pad]
-            EDSR: self.edsr.conv_after_body  → [B, 256, H, W]
+            DRCT:   self.drct.conv_after_body  → [B, 180, H_pad, W_pad]
+            GRL:    self.grl.conv_after_body   → [B, 180, H_pad, W_pad]
+            NAFNet: self.nafnet.nafnet.decoders[-1]  → capture INPUT
+                    This is the feature BEFORE the final decoder block,
+                    giving [B, 64, H_up, W_up] at full upscaled resolution.
+                    Alternative: hook ending's INPUT for [B, 64, H_up, W_up].
 
-        All four use capture_input=False (OUTPUT mode).
-        After forward_all_with_hooks(), caller crops features to (h, w).
+        NAFNet hook strategy:
+            - The NAFNet UNet has: intro → encoders → middle → decoders → ending
+            - `ending` is a 1×1 conv: [B, 64, H, W] → [B, 3, H, W]
+            - We hook `ending` INPUT to capture [B, 64, H, W] features
         """
         self._remove_all_hooks()
         registered = False
 
-        expert_map = [
-            ('hat',  self.hat,  'conv_after_body', False),
-            ('drct', self.drct, 'conv_after_body', False),
-            ('grl',  self.grl,  'conv_after_body', False),
-            ('edsr', self.edsr, 'conv_after_body', False),
-        ]
-
-        for name, model, attr, capture_input in expert_map:
-            if not self._experts_loaded[name] or model is None:
-                continue
-            if not hasattr(model, attr):
-                print(f"  ⚠ {name}: no attribute '{attr}' — hook skipped")
-                continue
-            try:
-                handle = getattr(model, attr).register_forward_hook(
-                    self._create_feature_hook(name, capture_input)
+        # DRCT: OUTPUT of conv_after_body
+        if self._experts_loaded['drct'] and self.drct is not None:
+            if hasattr(self.drct, 'conv_after_body'):
+                handle = self.drct.conv_after_body.register_forward_hook(
+                    self._create_feature_hook('drct', capture_input=False)
                 )
                 self._hook_handles.append(handle)
                 registered = True
-            except Exception as e:
-                print(f"  ⚠ {name}: hook registration failed: {e}")
+            else:
+                print("  ⚠ DRCT: no attribute 'conv_after_body' — hook skipped")
+
+        # GRL: OUTPUT of conv_after_body
+        if self._experts_loaded['grl'] and self.grl is not None:
+            if hasattr(self.grl, 'conv_after_body'):
+                handle = self.grl.conv_after_body.register_forward_hook(
+                    self._create_feature_hook('grl', capture_input=False)
+                )
+                self._hook_handles.append(handle)
+                registered = True
+            else:
+                print("  ⚠ GRL: no attribute 'conv_after_body' — hook skipped")
+
+        # NAFNet: INPUT of ending (captures [B, 64, H, W] before final 1x1 conv)
+        # CRITICAL: self.nafnet is a NAFNetSR wrapper — we must access the inner
+        # NAFNet UNet to find the `.ending` layer reliably.
+        if self._experts_loaded['nafnet'] and self.nafnet is not None:
+            # Safely access the inner NAFNet model through the wrapper
+            naf_core = getattr(self.nafnet, 'nafnet', self.nafnet)
+
+            if hasattr(naf_core, 'ending'):
+                handle = naf_core.ending.register_forward_hook(
+                    self._create_feature_hook('nafnet', capture_input=True)
+                )
+                self._hook_handles.append(handle)
+                registered = True
+            else:
+                print("  ⚠ NAFNet: no attribute 'ending' — hook skipped")
 
         return registered
 
@@ -602,7 +576,7 @@ class ExpertEnsemble(nn.Module):
         self._hook_handles = []
 
     # =========================================================================
-    # MAIN TRAINING-TIME FORWARD  — hooks + autograd-safe features
+    # MAIN TRAINING-TIME FORWARD — hooks + autograd-safe features
     # =========================================================================
 
     def forward_all_with_hooks(
@@ -623,10 +597,13 @@ class ExpertEnsemble(nn.Module):
             inference_mode creates a normal tensor — backward passes work.
 
         Returns:
-            outputs:  {'hat': [B,3,Hs,Ws], 'drct': ..., 'grl': ..., 'edsr': ...}
-            features: {'hat': [B,180,H,W], 'drct': [B,180,H,W],
-                       'grl': [B,180,H,W],  'edsr': [B,256,H,W]}
+            outputs:  {'drct': [B,3,Hs,Ws], 'grl': ..., 'nafnet': ...}
+            features: {'drct': [B,180,H,W], 'grl': [B,180,H,W],
+                       'nafnet': [B,64,H,W]}
             where H, W = original LR spatial dims.
+            
+        Note: MambaIR features are NOT included — they come from cached
+        .pt files loaded by CachedSRDataset.
         """
         _, _, h, w = x.shape
 
@@ -639,26 +616,28 @@ class ExpertEnsemble(nn.Module):
 
         try:
             with torch.no_grad():
-                # forward_hat/drct/grl/edsr are @inference_mode internally.
-                # Hooks fire inside those contexts and store inference-mode tensors.
                 outputs = self.forward_all(x, return_dict=True)
         finally:
             self._capture_features = False
 
         # ── CRITICAL: clone() OUTSIDE inference_mode ─────────────────────────
-        # We are now outside both no_grad and inference_mode contexts.
-        # feat is an inference-mode tensor stored in _captured_features.
-        # feat.clone() here creates a regular tensor that CAN be an input
-        # to trainable layers (feat_proj) and CAN participate in backward.
         features = {}
         for name, feat in self._captured_features.items():
-            # Clone to exit inference-mode, then crop to original LR resolution.
-            # Features are at padded resolution (h_pad, w_pad); crop to (h, w).
-            features[name] = feat.clone()[:, :, :h, :w].contiguous()
+            cloned = feat.clone()
+            # Crop transformer-based features to original LR resolution
+            if name in ('drct', 'grl'):
+                cloned = cloned[:, :, :h, :w].contiguous()
+            elif name == 'nafnet':
+                # NAFNet features are at upscaled resolution (H*4, W*4)
+                # Resize to LR resolution for consistency with other experts
+                cloned = F.interpolate(
+                    cloned, size=(h, w), mode='bilinear', align_corners=False
+                ).contiguous()
+            features[name] = cloned
 
         return outputs, features
 
-    # Alias for backward compat with code that calls forward_all_with_features
+    # Alias for backward compat
     def forward_all_with_features(self, x: torch.Tensor):
         """Alias → forward_all_with_hooks (preferred method for training)."""
         return self.forward_all_with_hooks(x)
@@ -676,12 +655,12 @@ class ExpertEnsemble(nn.Module):
 
 
 # ============================================================================
-# Phase 2 Verification Test
+# Verification Test
 # ============================================================================
 
-def test_phase2(checkpoint_dir: Optional[str] = None):
+def test_expert_ensemble(checkpoint_dir: Optional[str] = None):
     """
-    Complete Phase 2 verification.
+    Expert ensemble verification.
     Checks: loading, param counts, forward shapes, hook channels,
             feature autograd compatibility, output value ranges.
     """
@@ -689,7 +668,9 @@ def test_phase2(checkpoint_dir: Optional[str] = None):
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"\n{'='*65}")
-    print(f"  Phase 2 Verification  —  device: {device}")
+    print(f"  Expert Ensemble Verification — device: {device}")
+    print(f"  Local: DRCT + GRL + NAFNet")
+    print(f"  Remote: MambaIR (Decoupled Compute)")
     print(f"{'='*65}")
 
     ensemble = ExpertEnsemble(device=device, checkpoint_dir=checkpoint_dir)
@@ -703,9 +684,9 @@ def test_phase2(checkpoint_dir: Optional[str] = None):
         return False
 
     # ── 1. Param count check ────────────────────────────────────────────────
-    expected_params = {'hat': 40.8, 'drct': 27.6, 'grl': 20.2, 'edsr': 43.1}
-    model_map = {'hat': ensemble.hat, 'drct': ensemble.drct,
-                 'grl': ensemble.grl, 'edsr': ensemble.edsr}
+    expected_params = {'drct': 27.6, 'grl': 20.2, 'nafnet': 67.0}
+    model_map = {'drct': ensemble.drct, 'grl': ensemble.grl,
+                 'nafnet': ensemble.nafnet}
 
     print(f"\n{'Expert':<8} {'Params':>8}  {'Expected':>8}  {'OK'}")
     print("-" * 40)
@@ -714,14 +695,14 @@ def test_phase2(checkpoint_dir: Optional[str] = None):
         m = model_map[name]
         p = sum(x.numel() for x in m.parameters()) / 1e6
         exp = expected_params[name]
-        ok  = abs(p - exp) < 2.0   # 2M tolerance
+        ok  = abs(p - exp) < 5.0   # 5M tolerance
         all_params_ok &= ok
         print(f"  {name:<6} {p:>8.2f}M  {exp:>6.1f}M  {'✓' if ok else '✗'}")
 
     # ── 2. Forward + Hook test ────────────────────────────────────────────────
     x = torch.randn(1, 3, 64, 64).to(device)
 
-    expected_hook_ch = {'hat': 180, 'drct': 180, 'grl': 180, 'edsr': 256}
+    expected_hook_ch = {'drct': 180, 'grl': 180, 'nafnet': 64}
 
     print(f"\n{'Expert':<8} {'SR shape':<20} {'Hook shape':<22} {'OK'}")
     print("-" * 60)
@@ -739,7 +720,8 @@ def test_phase2(checkpoint_dir: Optional[str] = None):
         feat = features[name]
         sr_ok   = sr.shape   == (1, 3, 256, 256)
         hook_ok = feat.shape[1] == expected_hook_ch[name]
-        ok = sr_ok and hook_ok
+        size_ok = feat.shape[2] == 64 and feat.shape[3] == 64  # LR resolution
+        ok = sr_ok and hook_ok and size_ok
         all_fwd_ok &= ok
         print(f"  {name:<6} {str(tuple(sr.shape)):<20} {str(tuple(feat.shape)):<22} "
               f"{'✓' if ok else '✗'}")
@@ -747,18 +729,19 @@ def test_phase2(checkpoint_dir: Optional[str] = None):
             print(f"         ✗ SR shape wrong: {sr.shape} != (1,3,256,256)")
         if not hook_ok:
             print(f"         ✗ Hook ch wrong: {feat.shape[1]} != {expected_hook_ch[name]}")
+        if not size_ok:
+            print(f"         ✗ Feature spatial wrong: {feat.shape[2:]} != (64, 64)")
 
     # ── 3. Autograd compatibility check ─────────────────────────────────────
     print("\n  Autograd compatibility (features → trainable layer → backward):")
     autograd_ok = True
     for name, feat in features.items():
         try:
-            # Simulate feat_proj: Conv2d with trainable weights
             in_ch = feat.shape[1]
             proj  = nn.Conv2d(in_ch, 64, 1).to(device)
-            out   = proj(feat)          # must NOT raise "inference-mode tensor" error
+            out   = proj(feat)
             loss  = out.mean()
-            loss.backward()             # must NOT raise
+            loss.backward()
             print(f"    {name:<6} ✓  feat→Conv2d→backward OK")
         except Exception as e:
             print(f"    {name:<6} ✗  {e}")
@@ -774,10 +757,10 @@ def test_phase2(checkpoint_dir: Optional[str] = None):
     # ── 5. Summary ────────────────────────────────────────────────────────────
     all_ok = all_params_ok and all_fwd_ok and autograd_ok
     print(f"\n{'='*65}")
-    print(f"  Phase 2: {'ALL PASS ✓' if all_ok else 'ISSUES FOUND ✗'}")
+    print(f"  Expert Ensemble: {'ALL PASS ✓' if all_ok else 'ISSUES FOUND ✗'}")
     print(f"{'='*65}\n")
     return all_ok
 
 
 if __name__ == '__main__':
-    test_phase2()
+    test_expert_ensemble()

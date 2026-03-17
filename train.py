@@ -263,7 +263,8 @@ def train_epoch_cached(
     Train for one epoch using CACHED expert features.
     
     This is 10-20x faster than standard training because expert models
-    (HAT, DRCT, GRL, EDSR) are NOT run - their outputs are loaded from disk.
+    (DRCT, GRL, NAFNet) are NOT run - their outputs are loaded from disk.
+    MambaIR features are also loaded from FP16 .pt files (extracted on Colab).
     
     The cached dataset provides:
     - expert_imgs: Dict with pre-computed SR outputs
@@ -470,10 +471,19 @@ def validate_epoch(
         # Forward pass - handle cached vs standard mode
         if cached_mode and 'expert_imgs' in batch:
             # CACHED MODE: Use precomputed expert features
-            expert_imgs = {k: v.to(device, non_blocking=True) for k, v in batch['expert_imgs'].items()}
+            # CRITICAL: Cast .float() to handle FP16 cached validation tensors
+            expert_imgs = {
+                k: v.to(device, non_blocking=True).float()
+                for k, v in batch['expert_imgs'].items()
+            }
             expert_feats = None
             if 'expert_feats' in batch:
-                expert_feats = {k: v.to(device, non_blocking=True) for k, v in batch['expert_feats'].items()}
+                expert_feats = {
+                    k: v.to(device, non_blocking=True).float()
+                    for k, v in batch['expert_feats'].items()
+                }
+            # Direct full-image forward pass
+            # The model is now dynamically scalable to any resolution!
             sr_img = model.forward_with_precomputed(lr_img, expert_imgs, expert_feats)
         else:
             # STANDARD MODE: Run live experts
@@ -672,8 +682,9 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
     # In CACHED MODE: Don't load experts - use precomputed features instead
     if cached_mode:
         print("\n  *** CACHED MODE: Skipping expert model loading ***")
-        print("  Experts (HAT, DRCT, GRL, EDSR) are NOT needed in cached mode!")
-        print("  This saves ~131M parameters and significant GPU memory.\n")
+        print("  Experts (DRCT, GRL, NAFNet) are NOT needed in cached mode!")
+        print("  MambaIR features loaded from .pt files (Decoupled Compute).")
+        print("  This saves ~115M parameters and significant GPU memory.\n")
         
         # Get improvement settings from config
         improvements = fusion_config.get('improvements', {})
@@ -783,7 +794,7 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
         print("EXPERT ENSEMBLE (Single GPU)")
         print("=" * 60)
         ensemble = model.expert_ensemble
-        for name in ['hat', 'drct', 'grl', 'edsr']:
+        for name in ['drct', 'grl', 'nafnet']:
             if ensemble._experts_loaded.get(name, False):
                 expert_model = getattr(ensemble, name, None)
                 if expert_model is not None:
@@ -909,6 +920,17 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
         start_epoch = checkpoint['epoch'] + 1
         if 'metrics' in checkpoint and 'psnr' in checkpoint['metrics']:
             best_psnr = checkpoint['metrics']['psnr']
+        
+        # Restore EMA shadow weights if saved in checkpoint
+        if ema is not None and 'ema_shadow' in checkpoint:
+            restored_count = 0
+            for name, shadow_param in checkpoint['ema_shadow'].items():
+                if name in ema.shadow:
+                    ema.shadow[name] = shadow_param.to(device)
+                    restored_count += 1
+            print(f"  \u2713 Restored EMA shadow weights ({restored_count} params)")
+        elif ema is not None:
+            print(f"  \u26a0 No EMA state in checkpoint \u2014 EMA will rebuild from scratch")
         print(f"  Resuming from epoch {start_epoch}, best PSNR: {best_psnr:.2f} dB")
     
     # ========================================================================
@@ -967,21 +989,31 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
             if cached_mode:
                 # In cached mode, use forward_with_precomputed with mock data
                 print("  Warming up cached mode (no expert inference)...")
-                mock_experts = {'hat': torch.randn(1, 3, 256, 256, device=device),
-                               'drct': torch.randn(1, 3, 256, 256, device=device),
-                               'grl': torch.randn(1, 3, 256, 256, device=device),
-                               'edsr': torch.randn(1, 3, 256, 256, device=device)}
-                mock_feats = {'hat': torch.randn(1, 180, 64, 64, device=device),
-                              'drct': torch.randn(1, 180, 64, 64, device=device),
-                              'grl': torch.randn(1, 180, 64, 64, device=device),
-                              'edsr': torch.randn(1, 256, 64, 64, device=device)}
-                for i in range(3):
-                    torch.cuda.synchronize()
-                    t0 = time.time()
-                    _ = model.forward_with_precomputed(warmup_input, mock_experts, mock_feats)
-                    torch.cuda.synchronize()
-                    t1 = time.time()
-                    print(f"  Warmup pass {i+1}: {t1-t0:.3f}s (cached mode)")
+                # Must match the actual 4 experts: DRCT, GRL, NAFNet, MambaIR
+                # Each expert outputs 3-channel RGB → 4×3 = 12 input channels
+                mock_experts = {
+                    'drct':   torch.randn(1, 3, 256, 256, device=device),
+                    'grl':    torch.randn(1, 3, 256, 256, device=device),
+                    'nafnet': torch.randn(1, 3, 256, 256, device=device),
+                    'mamba':  torch.randn(1, 3, 256, 256, device=device),
+                }
+                # Feature dims: DRCT=180, GRL=180, NAFNet=64, MambaIR=180
+                mock_feats = {
+                    'drct':   torch.randn(1, 180, 64, 64, device=device),
+                    'grl':    torch.randn(1, 180, 64, 64, device=device),
+                    'nafnet': torch.randn(1, 64,  64, 64, device=device),
+                    'mamba':  torch.randn(1, 180, 64, 64, device=device),
+                }
+                try:
+                    for i in range(3):
+                        torch.cuda.synchronize()
+                        t0 = time.time()
+                        _ = model.forward_with_precomputed(warmup_input, mock_experts, mock_feats)
+                        torch.cuda.synchronize()
+                        t1 = time.time()
+                        print(f"  Warmup pass {i+1}: {t1-t0:.3f}s (cached mode)")
+                except Exception as e:
+                    print(f"  [Warning] Warmup failed, but continuing: {e}")
             else:
                 for i in range(3):
                     torch.cuda.synchronize()
@@ -1082,6 +1114,11 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
 
         # 4. Save checkpoint: Save if it's a scheduled save OR if it's a new best!
         if checkpoint_manager.should_save(epoch) or is_best or epoch == total_epochs - 1:
+            # Build extra state — include EMA shadow weights for seamless resume
+            extra = {'stage': stage_num}
+            if ema is not None:
+                extra['ema_shadow'] = {k: v.cpu() for k, v in ema.shadow.items()}
+                extra['ema_decay'] = ema.decay
             checkpoint_manager.save_checkpoint(
                 epoch=epoch,
                 model=model,
@@ -1089,7 +1126,7 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
                 scheduler=scheduler,
                 metrics=val_metrics,
                 is_best=is_best,
-                extra_state={'stage': stage_num}
+                extra_state=extra
             )
         # ==========================================================
         
@@ -1109,7 +1146,7 @@ def train(config: Dict, resume_path: Optional[str] = None, args = None):
             print(f"  Best PSNR: {best_psnr:.2f} dB")
         if torch.cuda.is_available():
             mem_used = torch.cuda.max_memory_allocated(device) / 1e9
-            mem_total = torch.cuda.get_device_properties(device).total_mem / 1e9
+            mem_total = torch.cuda.get_device_properties(device).total_memory / 1e9
             print(f"  GPU Memory: {mem_used:.2f}/{mem_total:.1f} GB ({mem_used/mem_total*100:.0f}%)")
             torch.cuda.reset_peak_memory_stats(device)
         # ETA estimate

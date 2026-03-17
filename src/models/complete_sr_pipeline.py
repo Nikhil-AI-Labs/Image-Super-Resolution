@@ -5,7 +5,7 @@ NTIRE 2025 Championship Architecture - Full 7-Phase Implementation
 
 This module implements the COMPLETE end-to-end pipeline:
 
-Phase 1: Expert Processing (HAT, DAT, NAFNet - frozen)
+Phase 1: Expert Processing (DRCT, GRL, NAFNet + MambaIR cached - frozen)
 Phase 2: Frequency Decomposition (DCT with adaptive bands)
 Phase 3: Cross-Band Communication (frequency bands interact)
 Phase 4: Collaborative Feature Learning (experts share features)
@@ -28,7 +28,7 @@ from typing import Dict, List, Tuple, Optional, Union
 from pathlib import Path
 
 # Import existing components
-from src.models.enhanced_fusion import CompleteEnhancedFusionSR, create_complete_enhanced_fusion
+from src.models.enhanced_fusion_v2 import CompleteEnhancedFusionSR, create_enhanced_fusion
 from src.models.tsdsr_wrapper import TSDSRInference, create_tsdsr_refinement_pipeline
 
 
@@ -78,7 +78,7 @@ class CompleteSRPipeline(nn.Module):
         tsdsr_teacher_path: Optional[str] = None,
         tsdsr_vae_path: Optional[str] = None,
         # Fusion configuration
-        num_experts: int = 3,
+        num_experts: int = 4,
         num_bands: int = 3,
         block_size: int = 8,
         upscale: int = 4,
@@ -97,11 +97,11 @@ class CompleteSRPipeline(nn.Module):
         Initialize complete SR pipeline.
         
         Args:
-            expert_ensemble: Loaded ExpertEnsemble with HAT, DAT, NAFNet
+            expert_ensemble: Loaded ExpertEnsemble with DRCT, GRL, NAFNet (MambaIR cached)
             tsdsr_student_path: Path to TSD-SR student model (.safetensors)
             tsdsr_teacher_path: Path to TSD-SR teacher model (optional, for validation)
             tsdsr_vae_path: Path to TSD-SR VAE weights
-            num_experts: Number of experts (3)
+            num_experts: Number of experts (4)
             num_bands: Number of frequency bands (3)
             block_size: DCT block size (8)
             upscale: Upscaling factor (4)
@@ -362,7 +362,7 @@ def create_complete_pipeline(
         'tsdsr_teacher_path': 'pretrained/teacher/teacher.safetensors',
         'tsdsr_vae_path': 'pretrained/tsdsr/vae.safetensors',
         # Fusion config
-        'num_experts': 3,
+        'num_experts': 4,
         'num_bands': 3,
         'block_size': 8,
         'upscale': 4,
@@ -471,9 +471,10 @@ def test_complete_pipeline():
             H_hr, W_hr = H * 4, W * 4
             
             outputs = {
-                'hat': F.interpolate(x, size=(H_hr, W_hr), mode='bilinear', align_corners=False),
-                'dat': F.interpolate(x, size=(H_hr, W_hr), mode='bilinear', align_corners=False),
+                'drct':   F.interpolate(x, size=(H_hr, W_hr), mode='bilinear', align_corners=False),
+                'grl':    F.interpolate(x, size=(H_hr, W_hr), mode='bilinear', align_corners=False),
                 'nafnet': F.interpolate(x, size=(H_hr, W_hr), mode='bilinear', align_corners=False),
+                'mamba':  F.interpolate(x, size=(H_hr, W_hr), mode='bilinear', align_corners=False),
             }
             
             if return_dict:
@@ -484,9 +485,10 @@ def test_complete_pipeline():
             outputs = self.forward_all(x, return_dict=True)
             H, W = x.shape[2], x.shape[3]
             features = {
-                'hat': torch.randn(x.shape[0], 180, H, W, device=x.device),
-                'dat': torch.randn(x.shape[0], 180, H, W, device=x.device),
-                'nafnet': torch.randn(x.shape[0], 64, H, W, device=x.device),
+                'drct':   torch.randn(x.shape[0], 180, H, W, device=x.device),
+                'grl':    torch.randn(x.shape[0], 180, H, W, device=x.device),
+                'nafnet': torch.randn(x.shape[0],  64, H, W, device=x.device),
+                'mamba':  torch.randn(x.shape[0], 180, H, W, device=x.device),
             }
             return outputs, features
     

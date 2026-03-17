@@ -1,14 +1,15 @@
 """
-Test Cached Training Pipeline
-==============================
-Integration test for the cached training feature.
+Test Cached Training Pipeline (Updated for DRCT+GRL+NAFNet+MambaIR)
+=====================================================================
+Integration test for the cached training feature with the new expert roster.
 
 Tests:
-1. CachedSRDataset loading and batching
+1. CachedSRDataset loading (DRCT + GRL + NAFNet + MambaIR FP16)
 2. CompleteEnhancedFusionSR with expert_ensemble=None
 3. forward_with_precomputed() works correctly
 4. Gradient flow through fusion network
 5. Training step optimization
+6. MambaIR FP16→FP32 conversion
 
 Usage:
     python scripts/test_cached_training.py
@@ -35,8 +36,7 @@ def test_cached_training():
     """Test the complete cached training pipeline."""
     print("\n" + "=" * 70)
     print("CACHED TRAINING INTEGRATION TEST")
-    print("=" * 70)
-    print("  Testing 10-20x faster training with pre-computed expert features")
+    print("  Experts: DRCT + GRL + NAFNet + MambaIR (FP16 from Colab)")
     print("=" * 70 + "\n")
     
     # Create temp directory for mock cached features
@@ -53,31 +53,39 @@ def test_cached_training():
         for i in range(num_samples):
             filename = f"test_img_{i:03d}"
             
-            # Mock HAT part (matches extract_features_balanced.py output format)
-            hat_data = {
-                'outputs': {'hat': torch.randn(1, 3, 256, 256)},
-                'features': {'hat': torch.randn(1, 180, 64, 64)},
+            # Mock DRCT part (includes LR/HR)
+            drct_data = {
+                'outputs': {'drct': torch.randn(1, 3, 256, 256)},
+                'features': {'drct': torch.randn(1, 180, 64, 64)},
                 'lr': torch.randn(3, 64, 64),
                 'hr': torch.randn(3, 256, 256),
                 'filename': filename
             }
-            torch.save(hat_data, temp_dir / f"{filename}_hat_part.pt")
+            torch.save(drct_data, temp_dir / f"{filename}_drct_part.pt")
             
-            # Mock rest part
+            # Mock rest part — GRL + NAFNet
             rest_data = {
                 'outputs': {
-                    'dat': torch.randn(1, 3, 256, 256),
-                    'nafnet': torch.randn(1, 3, 256, 256)
+                    'grl':    torch.randn(1, 3, 256, 256),
+                    'nafnet': torch.randn(1, 3, 256, 256),
                 },
                 'features': {
-                    'dat': torch.randn(1, 180, 64, 64),
-                    'nafnet': torch.randn(1, 64, 64, 64)
+                    'grl':    torch.randn(1, 180, 64, 64),
+                    'nafnet': torch.randn(1, 64, 64, 64),  # NAFNet = 64 channels
                 },
-                'filename': filename
+                'filename': filename,
             }
             torch.save(rest_data, temp_dir / f"{filename}_rest_part.pt")
+            
+            # Mock MambaIR part (FP16 — simulates Colab extraction!)
+            mamba_data = {
+                'outputs': {'mamba': torch.randn(1, 3, 256, 256).half()},
+                'features': {'mamba': torch.randn(1, 180, 64, 64).half()},
+                'filename': filename,
+            }
+            torch.save(mamba_data, temp_dir / f"{filename}_mamba_part.pt")
         
-        print(f"  Created {num_samples} mock cached feature files")
+        print(f"  Created {num_samples} mock cached feature files (DRCT + rest + MambaIR)")
         print("  [PASSED]\n")
         
         # ====================================================================
@@ -99,11 +107,34 @@ def test_cached_training():
         sample = dataset[0]
         assert 'lr' in sample and 'hr' in sample
         assert 'expert_imgs' in sample and 'expert_feats' in sample
-        assert set(sample['expert_imgs'].keys()) == {'hat', 'dat', 'nafnet'}
+        
+        expected_experts = {'drct', 'grl', 'nafnet', 'mamba'}
+        assert set(sample['expert_imgs'].keys()) == expected_experts, \
+            f"Expected {expected_experts}, got {set(sample['expert_imgs'].keys())}"
+        
+        # Verify MambaIR FP16→FP32 conversion
+        assert sample['expert_imgs']['mamba'].dtype == torch.float32, \
+            f"MambaIR output should be FP32, got {sample['expert_imgs']['mamba'].dtype}"
+        assert sample['expert_feats']['mamba'].dtype == torch.float32, \
+            f"MambaIR features should be FP32, got {sample['expert_feats']['mamba'].dtype}"
+        
+        # Verify NAFNet channels
+        assert sample['expert_feats']['nafnet'].shape[0] == 64, \
+            f"NAFNet features should have 64 channels, got {sample['expert_feats']['nafnet'].shape[0]}"
+        assert sample['expert_feats']['drct'].shape[0] == 180, \
+            f"DRCT features should have 180 channels, got {sample['expert_feats']['drct'].shape[0]}"
+        assert sample['expert_feats']['mamba'].shape[0] == 180, \
+            f"MambaIR features should have 180 channels, got {sample['expert_feats']['mamba'].shape[0]}"
         
         print(f"  Dataset length: {len(dataset)}")
         print(f"  Sample keys: {list(sample.keys())}")
         print(f"  Expert outputs: {list(sample['expert_imgs'].keys())}")
+        print(f"  Expert features: {list(sample['expert_feats'].keys())}")
+        print(f"  Feature channels: drct={sample['expert_feats']['drct'].shape[0]}, "
+              f"grl={sample['expert_feats']['grl'].shape[0]}, "
+              f"nafnet={sample['expert_feats']['nafnet'].shape[0]}, "
+              f"mamba={sample['expert_feats']['mamba'].shape[0]}")
+        print(f"  MambaIR dtype: {sample['expert_imgs']['mamba'].dtype} [OK] (converted from FP16)")
         print("  [PASSED]\n")
         
         # ====================================================================
@@ -111,7 +142,7 @@ def test_cached_training():
         # ====================================================================
         print("--- Test 3: Model with expert_ensemble=None ---")
         
-        from src.models.enhanced_fusion import CompleteEnhancedFusionSR
+        from src.models.enhanced_fusion_v2 import CompleteEnhancedFusionSR
         
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f"  Device: {device}")
@@ -119,7 +150,7 @@ def test_cached_training():
         # Create model WITHOUT experts (cached mode)
         model = CompleteEnhancedFusionSR(
             expert_ensemble=None,  # CACHED MODE!
-            num_experts=3,
+            num_experts=4,
             upscale=4,
             enable_dynamic_selection=True,
             enable_cross_band_attn=True,
@@ -152,6 +183,8 @@ def test_cached_training():
         
         print(f"  Input LR shape: {lr_img.shape}")
         print(f"  Expert outputs: {list(expert_imgs.keys())}")
+        print(f"  Expert features: {{" + 
+              ", ".join(f"'{k}': {list(v.shape)}" for k, v in expert_feats.items()) + "}}")
         
         with torch.no_grad():
             sr_output = model.forward_with_precomputed(lr_img, expert_imgs, expert_feats)
@@ -216,7 +249,7 @@ def test_cached_training():
             print("  [FAILED] forward() should raise RuntimeError in cached mode!")
             assert False
         except RuntimeError as e:
-            if "cached mode" in str(e):
+            if "cached mode" in str(e).lower() or "expert_ensemble" in str(e).lower():
                 print(f"  Correctly raised error: {str(e)[:60]}...")
                 print("  [PASSED]\n")
             else:
@@ -226,18 +259,19 @@ def test_cached_training():
         # Summary
         # ====================================================================
         print("=" * 70)
-        print("✓ ALL CACHED TRAINING TESTS PASSED!")
+        print("[OK] ALL CACHED TRAINING TESTS PASSED!")
         print("=" * 70)
-        print("\nCached training pipeline is ready:")
-        print("  ✓ CachedSRDataset loads and batches .pt files correctly")
-        print("  ✓ CompleteEnhancedFusionSR works with expert_ensemble=None")
-        print("  ✓ forward_with_precomputed() produces valid SR output")
-        print("  ✓ Gradients flow correctly through fusion network")
-        print("  ✓ Training optimization works")
-        print("  ✓ forward() correctly blocked in cached mode")
+        print("\nPipeline verified for DRCT + GRL + NAFNet + MambaIR:")
+        print("  [OK] CachedSRDataset loads DRCT/GRL/NAFNet + MambaIR (FP16->FP32)")
+        print("  [OK] CompleteEnhancedFusionSR works with expert_ensemble=None")
+        print("  [OK] forward_with_precomputed() produces valid SR output")
+        print("  [OK] Gradients flow correctly through fusion network")
+        print("  [OK] Training optimization works")
+        print("  [OK] forward() correctly blocked in cached mode")
         print("\nNext steps:")
-        print("  1. Run extraction: python scripts/extract_features_balanced.py")
-        print("  2. Train with cache: python train.py --cached --cache-dir <path>")
+        print("  1. Run MambaIR extraction on Colab: scripts/extract_mamba_features.py")
+        print("  2. Run local extraction (DRCT+GRL+NAFNet): scripts/extract_features_balanced.py")
+        print("  3. Train with cache: python train.py --cached --cache-dir <path>")
         print("\n")
         
         return True

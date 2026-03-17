@@ -1,12 +1,12 @@
 """
 scripts/extract_features_multi_gpu.py
 =====================================
-Multi-GPU Feature Extractor — Phase 3 (4 Experts: HAT, DRCT, GRL, EDSR)
+Multi-GPU Feature Extractor (3 Local Experts: DRCT, GRL, NAFNet)
 
 Uses torch.multiprocessing.spawn to split the dataset across all available GPUs.
-Each GPU loads its own copy of the 4 experts and processes its shard independently.
-Output format is IDENTICAL to extract_features_balanced.py (_hat_part.pt + _rest_part.pt),
-so the cached training pipeline works unchanged with a single GPU.
+Each GPU loads its own copy of the 3 local experts and processes its shard.
+Output format is IDENTICAL to extract_features_balanced.py (_drct_part.pt + _rest_part.pt),
+so the cached training pipeline works unchanged.
 
 Usage:
   python scripts/extract_features_multi_gpu.py                     # use all GPUs
@@ -150,10 +150,10 @@ def extract_split_worker(
         for idx in pbar:
             sample   = dataset[idx]
             stem     = Path(sample['filename']).stem
-            hat_path  = save_dir / f"{stem}_hat_part.pt"
+            drct_path = save_dir / f"{stem}_drct_part.pt"
             rest_path = save_dir / f"{stem}_rest_part.pt"
 
-            if args.resume and hat_path.exists() and rest_path.exists():
+            if args.resume and drct_path.exists() and rest_path.exists():
                 skipped += 1
                 continue
 
@@ -169,27 +169,25 @@ def extract_split_worker(
 
             lh, lw = sample['lr'].shape[-2], sample['lr'].shape[-1]
 
-            # ── HAT part (includes LR / HR for dataset reconstruction) ──
+            # ── DRCT part (includes LR / HR for dataset reconstruction) ──
             torch.save({
-                'outputs':  {'hat': outputs['hat'].cpu()},
-                'features': {'hat': features.get(
-                    'hat', torch.zeros(1, 180, lh, lw)).cpu()},
+                'outputs':  {'drct': outputs.get('drct', torch.zeros(1, 3, lh*4, lw*4)).cpu()},
+                'features': {'drct': features.get(
+                    'drct', torch.zeros(1, 180, lh, lw)).cpu()},
                 'lr':       sample['lr'],
                 'hr':       sample['hr'],
                 'filename': stem,
-            }, hat_path)
+            }, drct_path)
 
-            # ── Rest part (DRCT + GRL + EDSR) ───────────────────────────
+            # ── Rest part (GRL + NAFNet) ──────────────────────────────────
             torch.save({
                 'outputs': {
-                    'drct': outputs.get('drct', torch.zeros(1, 3, lh*4, lw*4)).cpu(),
-                    'grl':  outputs.get('grl',  torch.zeros(1, 3, lh*4, lw*4)).cpu(),
-                    'edsr': outputs.get('edsr', torch.zeros(1, 3, lh*4, lw*4)).cpu(),
+                    'grl':    outputs.get('grl',    torch.zeros(1, 3, lh*4, lw*4)).cpu(),
+                    'nafnet': outputs.get('nafnet', torch.zeros(1, 3, lh*4, lw*4)).cpu(),
                 },
                 'features': {
-                    'drct': features.get('drct', torch.zeros(1, 180, lh, lw)).cpu(),
-                    'grl':  features.get('grl',  torch.zeros(1, 180, lh, lw)).cpu(),
-                    'edsr': features.get('edsr', torch.zeros(1, 256, lh, lw)).cpu(),
+                    'grl':    features.get('grl',    torch.zeros(1, 180, lh, lw)).cpu(),
+                    'nafnet': features.get('nafnet', torch.zeros(1, 64,  lh, lw)).cpu(),
                 },
                 'filename': stem,
             }, rest_path)
@@ -211,13 +209,13 @@ def extract_split_worker(
     elapsed = time.time() - t0
 
     if rank == 0:
-        n_hat  = len(list(save_dir.glob("*_hat_part.pt")))
+        n_drct = len(list(save_dir.glob("*_drct_part.pt")))
         n_rest = len(list(save_dir.glob("*_rest_part.pt")))
         print(f"\n  {split_name.upper()} complete in {elapsed/60:.1f} min")
         print(f"  GPU 0 stats — Processed: {processed}  |  Skipped: {skipped}  |  Errors: {errors}")
-        print(f"  Files on disk — hat_parts: {n_hat}  rest_parts: {n_rest}")
-        if n_hat != n_rest:
-            print(f"  WARNING: hat/rest counts mismatch! Run again with --resume to fix.")
+        print(f"  Files on disk — drct_parts: {n_drct}  rest_parts: {n_rest}")
+        if n_drct != n_rest:
+            print(f"  WARNING: drct/rest counts mismatch! Run again with --resume to fix.")
 
     return processed, elapsed
 
@@ -275,7 +273,8 @@ def main():
         sys.exit(1)
 
     print("\n" + "=" * 70)
-    print(f"  MULTI-GPU FEATURE EXTRACTOR  (Phase 3 — HAT/DRCT/GRL/EDSR)")
+    print(f"  MULTI-GPU FEATURE EXTRACTOR  (DRCT/GRL/NAFNet)")
+    print(f"  MambaIR: use extract_mamba_features.py on Colab/Kaggle")
     print(f"  GPUs detected: {avail_gpus}  |  Using: {num_gpus}")
     print("=" * 70)
     for i in range(num_gpus):
@@ -283,8 +282,8 @@ def main():
         mem  = torch.cuda.get_device_properties(i).total_memory / 1e9
         print(f"    GPU {i}: {name}  ({mem:.0f} GB VRAM)")
     print("=" * 70)
-    print("  API: forward_all_with_hooks()  (Phase 2)")
-    print("  Output format: _hat_part.pt + _rest_part.pt per image")
+    print("  API: forward_all_with_hooks()")
+    print("  Output format: _drct_part.pt + _rest_part.pt per image")
     print("  (Identical to single-GPU extractor — cached training unchanged)")
     print("=" * 70 + "\n")
 

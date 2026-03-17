@@ -11,8 +11,13 @@ Metrics:
 - MUSIQ: Multi-Scale Image Quality Transformer (higher is better)
 - MANIQA: Multi-dimension Attention Network for IQA (higher is better)
 
-Combined Score (NTIRE Track B formula):
-    Score = 0.3 * CLIP-IQA + 0.25 * MANIQA + 0.25 * MUSIQ + 0.2 * (1 - LPIPS)
+Combined Score (NTIRE Track B additive, range ≈ 0–6, higher is better):
+    Score = (1 - LPIPS)          [0–1, perceptual distance inverted]
+          + (1 - DISTS)          [0–1, texture distance inverted]
+          + CLIP-IQA             [0–1, no-reference quality]
+          + MANIQA               [0–1, multi-dimension attention IQA]
+          + MUSIQ / 100          [0–1, normalized from 0–100 scale]
+          + max(0, 10 - NIQE/10) [0–~9, naturalness, typical NIQE ≈ 2–6]
 
 Author: NTIRE SR Team
 """

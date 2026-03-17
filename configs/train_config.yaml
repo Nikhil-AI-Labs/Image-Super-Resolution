@@ -2,13 +2,15 @@
 # CHAMPIONSHIP SR TRAINING - CHAMPIONSHIP ARCHITECTURE CONFIGURATION
 # ============================================================================
 # Hardware: Single GPU (26GB VRAM)
-# Experts: HAT-L, DRCT-L, GRL-B, EDSR-L (4-expert ensemble)
+# Experts: DRCT-L, GRL-B, NAFNet-64, MambaIR-180 (4-expert ensemble)
+#   - Local: DRCT-L + GRL-B + NAFNet-64 (loaded on GPU)
+#   - Remote: MambaIR features pre-extracted on Colab/Kaggle (FP16 .pt files)
 # Target: 35.5 dB PSNR
-# Parameters: ~1.2M trainable, ~131.7M frozen
+# Parameters: ~1.2M trainable, ~115M frozen (local only)
 # ============================================================================
 
-experiment_name: "championship_sr_phase3_single_gpu"
-description: "Phase 3 - 4-expert fusion (HAT+DRCT+GRL+EDSR) - Single GPU 26GB - 200 epochs"
+experiment_name: "championship_sr_drct_grl_nafnet_mamba"
+description: "DRCT+GRL+NAFNet+MambaIR fusion - Decoupled Compute - Single GPU"
 
 # ============================================================================
 # MODEL CONFIGURATION
@@ -18,16 +20,6 @@ model:
   scale: 4
   
   experts:
-    - name: "HAT"
-      weight_path: "pretrained/hat/HAT-L_SRx4_ImageNet-pretrain.pth"
-      frozen: true
-      architecture:
-        type: "HAT-L"
-        embed_dim: 180
-        depths: [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
-        num_heads: [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
-        window_size: 16
-        
     - name: "DRCT"
       weight_path: "pretrained/drct/DRCT-L_X4.pth"
       frozen: true
@@ -48,13 +40,25 @@ model:
         num_heads: [6, 6, 6, 6, 6, 6]
         window_size: 8
         
-    - name: "EDSR"
-      weight_path: "pretrained/edsr/EDSR_Lx4_f256b32_DIV2K_official-76ee1c8f.pth"
+    - name: "NAFNet"
+      weight_path: "pretrained/nafnet/NAFNet-SIDD-width64.pth"
       frozen: true
       architecture:
-        type: "EDSR-L"
-        num_feat: 256
-        num_block: 32
+        type: "NAFNet-SIDD-width64"
+        width: 64
+        middle_blk_num: 12
+        enc_blk_nums: [2, 2, 4, 8]
+        dec_blk_nums: [2, 2, 2, 2]
+        
+    - name: "MambaIR"
+      weight_path: null  # Features extracted on Colab/Kaggle
+      frozen: true
+      remote_only: true  # NOT loaded locally — Decoupled Compute
+      architecture:
+        type: "MambaIR"
+        embed_dim: 180
+        depths: [6, 6, 6, 6, 6, 6]
+        upsampler: "pixelshuffle"
   
   fusion:
     num_experts: 4
@@ -91,25 +95,25 @@ tsdsr:
 # TRAINING CONFIGURATION (SINGLE GPU - 26GB)
 # ============================================================================
 training:
-  total_epochs: 200
+  total_epochs: 150
   
   # Single GPU settings (26GB VRAM)
-  batch_size: 32
+  batch_size: 8
   num_workers: 4
   prefetch_factor: 2
   persistent_workers: true
   pin_memory: true
   
   # Precision and optimization
-  precision: "fp16"
-  use_amp: true
+  precision: "fp32"
+  use_amp: false
   gradient_clip: 1.0
-  accumulation_steps: 1
+  accumulation_steps: 4
   
   # Optimizer
   optimizer:
     type: "AdamW"
-    lr: 1.0e-4
+    lr: 2.0e-4
     betas: [0.9, 0.999]
     weight_decay: 1.0e-4
     eps: 1.0e-8
@@ -135,7 +139,7 @@ loss:
   # Stage-based loss weights (championship strategy)
   stages:
     # Stage 1: Pure L1 reconstruction (0-80 epochs)
-    - epochs: [0, 80]
+    - epochs: [0, 50]
       stage_name: "foundation_psnr"
       description: "Build strong pixel-level reconstruction"
       weights:
@@ -147,7 +151,7 @@ loss:
         vgg: 0.0
     
     # Stage 2: Add frequency losses (80-150 epochs)
-    - epochs: [80, 150]
+    - epochs: [50, 100]
       stage_name: "frequency_refinement"
       description: "Enhance frequency detail with SWT + FFT"
       weights:
@@ -159,7 +163,7 @@ loss:
         vgg: 0.0
     
     # Stage 3: Detail enhancement (150-200 epochs)
-    - epochs: [150, 200]
+    - epochs: [100, 150]
       stage_name: "detail_enhancement"
       description: "Final edge and texture refinement"
       weights:
@@ -240,14 +244,14 @@ dataset:
     use_random_crop_scale: true
     crop_scale_range: [0.9, 1.1]
   
-  repeat_factor: 20
+  repeat_factor: 1
 
 # ============================================================================
 # VALIDATION CONFIGURATION
 # ============================================================================
 validation:
   validate_every: 5
-  validate_start: 10
+  validate_start: 0
   metrics:
     - "psnr"
     - "ssim"
@@ -344,3 +348,7 @@ monitoring:
     patience: 10
     factor: 0.5
     min_lr: 1.0e-7
+
+
+
+    

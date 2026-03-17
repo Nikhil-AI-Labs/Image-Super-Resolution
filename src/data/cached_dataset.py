@@ -4,22 +4,33 @@ Cached Super-Resolution Dataset
 Loads pre-computed expert outputs and features from disk for ultra-fast training.
 
 This dataset is designed to work with features extracted by:
-    scripts/extract_features_balanced.py
+    scripts/extract_features_balanced.py  (DRCT + GRL + NAFNet — local GPU)
+    scripts/extract_mamba_features.py     (MambaIR — Colab/Kaggle)
 
 Expected file format:
     {cache_dir}/
-    ├── img_001_hat_part.pt   - Contains HAT SR output + features + LR/HR
-    ├── img_001_rest_part.pt  - Contains DRCT + GRL + EDSR SR outputs + features
-    ├── img_002_hat_part.pt
+    ├── img_001_drct_part.pt  - Contains DRCT SR output + features + LR/HR
+    ├── img_001_rest_part.pt  - Contains GRL + NAFNet SR outputs + features
+    ├── img_001_mamba_part.pt - Contains MambaIR SR output + features (FP16)
+    ├── img_002_drct_part.pt
     ├── img_002_rest_part.pt
+    ├── img_002_mamba_part.pt
     └── ...
 
-Each .pt file contains:
-    - outputs: Dict[str, Tensor] - SR outputs from experts
-    - features: Dict[str, Tensor] - Intermediate features for collaborative learning
-    - lr: Tensor - Original LR patch (in hat_part only)
-    - hr: Tensor - Original HR patch (in hat_part only)
-    - filename: str - Original filename stem
+Each _drct_part.pt file contains:
+    - outputs: Dict[str, Tensor]  - DRCT SR output
+    - features: Dict[str, Tensor] - DRCT intermediate features [B, 180, H, W]
+    - lr: Tensor - Original LR patch
+    - hr: Tensor - Original HR patch
+    - filename: str
+
+Each _rest_part.pt file contains:
+    - outputs: Dict[str, Tensor]  - GRL + NAFNet SR outputs
+    - features: Dict[str, Tensor] - GRL [B, 180, H, W] + NAFNet [B, 64, H, W]
+
+Each _mamba_part.pt file contains:
+    - outputs: Dict[str, Tensor]  - MambaIR SR output (FP16 → converted to FP32)
+    - features: Dict[str, Tensor] - MambaIR features [B, 180, H, W] (FP16 → FP32)
 
 Augmentation Note:
     Color jitter is NOT supported because it would require re-computing expert outputs.
@@ -41,6 +52,8 @@ class CachedSRDataset(Dataset):
     Dataset that loads pre-computed expert features from disk.
     
     Achieves 10-20x training speedup by skipping expert model inference.
+    
+    Supports 4 experts: DRCT, GRL, NAFNet (local), MambaIR (Colab/Kaggle FP16).
     
     Args:
         feature_dir: Path to cached features directory
@@ -67,33 +80,49 @@ class CachedSRDataset(Dataset):
         if not self.feature_dir.exists():
             raise RuntimeError(f"Feature cache directory not found: {feature_dir}")
         
-        # Find all unique filenames by looking for _hat_part.pt files
-        hat_files = sorted(list(self.feature_dir.glob("*_hat_part.pt")))
+        # Find all unique filenames by looking for _drct_part.pt files
+        drct_files = sorted(list(self.feature_dir.glob("*_drct_part.pt")))
         
-        if len(hat_files) == 0:
+        if len(drct_files) == 0:
             raise RuntimeError(
                 f"No cached features found in {feature_dir}!\n"
                 f"Run 'python scripts/extract_features_balanced.py' first."
             )
         
-        # Extract filename stems (without _hat_part.pt suffix)
-        self.file_stems = [f.name.replace('_hat_part.pt', '') for f in hat_files]
+        # Extract filename stems (without _drct_part.pt suffix)
+        self.file_stems = [f.name.replace('_drct_part.pt', '') for f in drct_files]
         
         # Verify matching rest_part files exist
-        missing = []
+        missing_rest = []
+        missing_mamba = []
         for stem in self.file_stems:
             rest_path = self.feature_dir / f"{stem}_rest_part.pt"
+            mamba_path = self.feature_dir / f"{stem}_mamba_part.pt"
             if not rest_path.exists():
-                missing.append(stem)
+                missing_rest.append(stem)
+            if not mamba_path.exists():
+                missing_mamba.append(stem)
         
-        if missing:
-            print(f"Warning: {len(missing)} files missing rest_part counterparts")
-            # Filter to only complete pairs
-            self.file_stems = [s for s in self.file_stems if s not in missing]
+        if missing_rest:
+            print(f"Warning: {len(missing_rest)} files missing rest_part counterparts")
+            # Filter to only complete pairs (drct + rest at minimum)
+            self.file_stems = [s for s in self.file_stems if s not in missing_rest]
+        
+        if missing_mamba:
+            print(f"Warning: {len(missing_mamba)} files missing mamba_part "
+                  f"(MambaIR features from Colab/Kaggle)")
+        
+        # Track which stems have mamba features
+        self.has_mamba = {
+            stem: (self.feature_dir / f"{stem}_mamba_part.pt").exists()
+            for stem in self.file_stems
+        }
+        n_mamba = sum(self.has_mamba.values())
         
         print(f"CachedSRDataset initialized:")
         print(f"  Directory: {feature_dir}")
         print(f"  Samples: {len(self.file_stems)}")
+        print(f"  MambaIR coverage: {n_mamba}/{len(self.file_stems)}")
         print(f"  Repeat factor: {repeat_factor}")
         print(f"  Effective length: {len(self)}")
         print(f"  Augmentation: {augment}")
@@ -119,21 +148,38 @@ class CachedSRDataset(Dataset):
         file_idx = idx % len(self.file_stems)
         stem = self.file_stems[file_idx]
         
-        # Load both parts
-        hat_path = self.feature_dir / f"{stem}_hat_part.pt"
-        rest_path = self.feature_dir / f"{stem}_rest_part.pt"
+        # Load DRCT part (contains LR/HR + DRCT output/features)
+        drct_path = self.feature_dir / f"{stem}_drct_part.pt"
+        data_drct = torch.load(drct_path, weights_only=False)
         
-        data_hat = torch.load(hat_path, weights_only=False)
+        # Load rest part (GRL + NAFNet outputs/features)
+        rest_path = self.feature_dir / f"{stem}_rest_part.pt"
         data_rest = torch.load(rest_path, weights_only=False)
         
-        # Extract LR/HR from HAT part (they're stored there)
-        lr = data_hat['lr']  # [3, H, W]
-        hr = data_hat['hr']  # [3, H*4, W*4]
+        # Extract LR/HR from DRCT part (they're stored there)
+        lr = data_drct['lr']  # [3, H, W]
+        hr = data_drct['hr']  # [3, H*4, W*4]
         
         # Merge expert outputs
         expert_imgs = {}
-        expert_imgs.update(data_hat['outputs'])
+        expert_imgs.update(data_drct['outputs'])
         expert_imgs.update(data_rest['outputs'])
+        
+        # Load MambaIR part (FP16 from Colab/Kaggle) if available
+        if self.has_mamba.get(stem, False):
+            mamba_path = self.feature_dir / f"{stem}_mamba_part.pt"
+            data_mamba = torch.load(mamba_path, weights_only=False)
+            # FP16 → FP32 conversion for training stability
+            for k, v in data_mamba['outputs'].items():
+                expert_imgs[k] = v.float()
+        else:
+            # Fallback: zero tensor (graceful degradation)
+            # Use drct output shape as reference for HR dimensions
+            ref_shape = next(iter(expert_imgs.values())).shape
+            if len(ref_shape) == 4:
+                expert_imgs['mamba'] = torch.zeros(ref_shape)
+            else:
+                expert_imgs['mamba'] = torch.zeros(ref_shape)
         
         # Squeeze batch dimension if present
         for name in expert_imgs:
@@ -144,8 +190,17 @@ class CachedSRDataset(Dataset):
         expert_feats = None
         if self.load_features:
             expert_feats = {}
-            expert_feats.update(data_hat.get('features', {}))
+            expert_feats.update(data_drct.get('features', {}))
             expert_feats.update(data_rest.get('features', {}))
+            
+            # Load MambaIR features (FP16 → FP32)
+            if self.has_mamba.get(stem, False):
+                for k, v in data_mamba.get('features', {}).items():
+                    expert_feats[k] = v.float()
+            else:
+                # Fallback: zero features
+                lr_h, lr_w = lr.shape[-2], lr.shape[-1]
+                expert_feats['mamba'] = torch.zeros(1, 180, lr_h, lr_w)
             
             # Squeeze batch dimension if present
             for name in expert_feats:
@@ -296,35 +351,41 @@ def test_cached_dataset():
     print(f"Test directory: {temp_dir}")
     
     try:
-        # Create mock cached files
+        # Create mock cached files (new format: DRCT + GRL + NAFNet + MambaIR)
         for i in range(5):
             filename = f"test_img_{i:03d}"
             
-            # Mock HAT part
-            hat_data = {
-                'outputs': {'hat': torch.randn(1, 3, 256, 256)},
-                'features': {'hat': torch.randn(1, 180, 64, 64)},
+            # Mock DRCT part (includes LR/HR)
+            drct_data = {
+                'outputs': {'drct': torch.randn(1, 3, 256, 256)},
+                'features': {'drct': torch.randn(1, 180, 64, 64)},
                 'lr': torch.randn(3, 64, 64),
                 'hr': torch.randn(3, 256, 256),
                 'filename': filename
             }
-            torch.save(hat_data, temp_dir / f"{filename}_hat_part.pt")
+            torch.save(drct_data, temp_dir / f"{filename}_drct_part.pt")
             
-            # Mock rest part — Phase 3: DRCT + GRL + EDSR
+            # Mock rest part — GRL + NAFNet
             rest_data = {
                 'outputs': {
-                    'drct': torch.randn(1, 3, 256, 256),
-                    'grl':  torch.randn(1, 3, 256, 256),
-                    'edsr': torch.randn(1, 3, 256, 256),
+                    'grl':    torch.randn(1, 3, 256, 256),
+                    'nafnet': torch.randn(1, 3, 256, 256),
                 },
                 'features': {
-                    'drct': torch.randn(1, 180, 64, 64),
-                    'grl':  torch.randn(1, 180, 64, 64),
-                    'edsr': torch.randn(1, 256, 64, 64),   # EDSR uses 256 channels
+                    'grl':    torch.randn(1, 180, 64, 64),
+                    'nafnet': torch.randn(1, 64, 64, 64),   # NAFNet uses 64 channels
                 },
                 'filename': filename,
             }
             torch.save(rest_data, temp_dir / f"{filename}_rest_part.pt")
+            
+            # Mock MambaIR part (FP16 — simulates Colab extraction)
+            mamba_data = {
+                'outputs': {'mamba': torch.randn(1, 3, 256, 256).half()},
+                'features': {'mamba': torch.randn(1, 180, 64, 64).half()},
+                'filename': filename,
+            }
+            torch.save(mamba_data, temp_dir / f"{filename}_mamba_part.pt")
         
         print(f"Created 5 mock cached feature files\n")
         
@@ -347,14 +408,19 @@ def test_cached_dataset():
         
         assert sample['lr'].shape == (3, 64, 64)
         assert sample['hr'].shape == (3, 256, 256)
-        assert 'hat'  in sample['expert_imgs']
-        assert 'drct' in sample['expert_imgs']
-        assert 'grl'  in sample['expert_imgs']
-        assert 'edsr' in sample['expert_imgs']
-        assert sample['expert_imgs']['hat'].shape  == (3, 256, 256)
-        assert sample['expert_imgs']['edsr'].shape == (3, 256, 256)
-        assert sample['expert_feats']['hat'].shape  == (180, 64, 64)
-        assert sample['expert_feats']['edsr'].shape == (256, 64, 64)  # 256 channels for EDSR
+        assert 'drct'   in sample['expert_imgs']
+        assert 'grl'    in sample['expert_imgs']
+        assert 'nafnet'  in sample['expert_imgs']
+        assert 'mamba'  in sample['expert_imgs']
+        assert sample['expert_imgs']['drct'].shape   == (3, 256, 256)
+        assert sample['expert_imgs']['nafnet'].shape  == (3, 256, 256)
+        assert sample['expert_imgs']['mamba'].shape   == (3, 256, 256)
+        # Verify MambaIR was converted from FP16 to FP32
+        assert sample['expert_imgs']['mamba'].dtype == torch.float32
+        assert sample['expert_feats']['drct'].shape   == (180, 64, 64)
+        assert sample['expert_feats']['nafnet'].shape  == (64, 64, 64)  # 64 channels for NAFNet
+        assert sample['expert_feats']['mamba'].shape   == (180, 64, 64)
+        assert sample['expert_feats']['mamba'].dtype   == torch.float32
         print("  [PASSED]\n")
         
         # Test 2: Repeat factor
@@ -394,11 +460,30 @@ def test_cached_dataset():
         
         print(f"  Batch LR: {batch['lr'].shape}")
         print(f"  Batch HR: {batch['hr'].shape}")
-        print(f"  Batch expert_imgs['hat']: {batch['expert_imgs']['hat'].shape}")
+        print(f"  Batch expert_imgs['drct']: {batch['expert_imgs']['drct'].shape}")
+        print(f"  Batch expert_imgs['mamba']: {batch['expert_imgs']['mamba'].shape}")
         
         assert batch['lr'].shape == (2, 3, 64, 64)
         assert batch['hr'].shape == (2, 3, 256, 256)
-        assert batch['expert_imgs']['hat'].shape == (2, 3, 256, 256)
+        assert batch['expert_imgs']['drct'].shape == (2, 3, 256, 256)
+        assert batch['expert_imgs']['mamba'].shape == (2, 3, 256, 256)
+        print("  [PASSED]\n")
+        
+        # Test 5: Missing MambaIR graceful degradation
+        print("--- Test 5: Missing MambaIR Graceful Degradation ---")
+        # Remove one mamba file
+        (temp_dir / "test_img_000_mamba_part.pt").unlink()
+        
+        dataset5 = CachedSRDataset(
+            feature_dir=str(temp_dir),
+            augment=False,
+            repeat_factor=1,
+            load_features=True
+        )
+        sample5 = dataset5[0]
+        assert 'mamba' in sample5['expert_imgs']
+        assert sample5['expert_imgs']['mamba'].shape == (3, 256, 256)
+        print(f"  Mamba output when missing: zeros tensor {sample5['expert_imgs']['mamba'].shape}")
         print("  [PASSED]\n")
         
         print("=" * 70)

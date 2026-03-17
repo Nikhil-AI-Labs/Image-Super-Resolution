@@ -3,11 +3,13 @@ Models Module
 =============
 Provides expert models, fusion network, and TSD-SR for NTIRE 2025 SR.
 
-Expert Models (Frozen):
-- HAT-L:  Hybrid Attention Transformer (Samsung NTIRE winner)
-- DRCT-L: Dense Residual Connected Transformer
-- GRL-B:  Global/Regional/Local attention (CVPR 2023)
-- EDSR-L: Enhanced Deep Residual (pure-conv baseline)
+Expert Models (Frozen, loaded locally):
+- DRCT-L:     Dense Residual Connected Transformer (27.6M)
+- GRL-B:      Global/Regional/Local attention (20.2M)
+- NAFNet-64:  Nonlinear Activation-Free Network (67M, SIDD denoiser)
+
+Expert Models (Remote — Decoupled Compute):
+- MambaIR-180: State Space Model SR (features extracted on Colab/Kaggle)
 
 Fusion Network (Trainable):
 - FrequencyRouter: Lightweight CNN for expert routing based on frequency
@@ -44,19 +46,15 @@ from .fusion_network import (
     CollaborativeFeatureLearning,
     EnhancedMultiFusionSR,
 )
-from .enhanced_fusion import (
-    CompleteEnhancedFusionSR,
-    create_complete_enhanced_fusion,
-)
-# V2 - Phase 3 implementation with 4 experts
+# V2 — canonical 4-expert implementation (DRCT + GRL + NAFNet + MambaIR)
 from .enhanced_fusion_v2 import (
+    CompleteEnhancedFusionSR,
+    create_enhanced_fusion,
     AdaptiveFrequencyDecomposition,
     CrossBandAttention as CrossBandAttentionV2,
     CollaborativeFeatureLearning as CollaborativeFeatureLearningV2,
     MultiResolutionFusion as MultiResolutionFusionV2,
     DynamicExpertSelector as DynamicExpertSelectorV2,
-    CompleteEnhancedFusionSR as EnhancedFusionV2,
-    create_enhanced_fusion,
 )
 from .tsdsr_wrapper import (
     TSDSRInference,
@@ -89,20 +87,15 @@ __all__ = [
     'MultiResolutionFusion',
     'CollaborativeFeatureLearning',
     
-    # Enhanced Fusion (Complete Pipeline)
+    # Enhanced Fusion V2 (Complete Pipeline — Use This!)
     'EnhancedMultiFusionSR',
     'CompleteEnhancedFusionSR',
-    'create_complete_enhanced_fusion',
-    
-    # V2 Complete Implementation (Use This!)
-    'EnhancedFusionV2',
     'create_enhanced_fusion',
     'AdaptiveFrequencyDecomposition',
     'CrossBandAttentionV2',
     'CollaborativeFeatureLearningV2',
     'MultiResolutionFusionV2',
     'DynamicExpertSelectorV2',
-
     
     # Attention Modules
     'ChannelAttention',
@@ -122,4 +115,3 @@ __all__ = [
     'create_training_pipeline',
     'create_inference_pipeline',
 ]
-

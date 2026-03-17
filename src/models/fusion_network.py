@@ -705,8 +705,8 @@ class FrequencyAwareFusion(nn.Module):
         
         Args:
             lr_input: LR input [B, 3, H, W]
-            expert_outputs: Either list [hat_sr, mambair_sr, nafnet_sr]
-                           or dict {'hat': hat_sr, 'mambair': mambair_sr, ...}
+            expert_outputs: Either list [drct_sr, grl_sr, nafnet_sr, mamba_sr]
+                           or dict {'drct': drct_sr, 'grl': grl_sr, ...}
                            Each expert output: [B, 3, H*4, W*4]
         
         Returns:
@@ -1105,11 +1105,12 @@ class CollaborativeFeatureLearning(nn.Module):
         self.feature_dim = feature_dim
         
         # Feature alignment (different experts have different dims)
-        # HAT: 180 channels, DAT: 180 channels, NAFNet: 64 channels
+        # DRCT: 180 channels, GRL: 180 channels, NAFNet: 64 channels, MambaIR: 180 channels
         self.align_layers = nn.ModuleDict({
-            'hat': nn.Conv2d(180, feature_dim, 1),
-            'dat': nn.Conv2d(180, feature_dim, 1),
-            'nafnet': nn.Conv2d(64, feature_dim, 1),
+            'drct':   nn.Conv2d(180, feature_dim, 1),
+            'grl':    nn.Conv2d(180, feature_dim, 1),
+            'nafnet': nn.Conv2d(64,  feature_dim, 1),
+            'mamba':  nn.Conv2d(180, feature_dim, 1),
         })
         
         # Cross-expert attention
@@ -1151,7 +1152,8 @@ class CollaborativeFeatureLearning(nn.Module):
         
         Args:
             expert_features: Dict of intermediate features from each expert
-                             {'hat': [B, 180, H, W], 'dat': [B, 180, H, W], 'nafnet': [B, 64, H, W]}
+                             {'drct': [B, 180, H, W], 'grl': [B, 180, H, W],
+                              'nafnet': [B, 64, H, W], 'mamba': [B, 180, H, W]}
             expert_outputs: List of final SR outputs [B, 3, H_sr, W_sr]
             
         Returns:
@@ -1201,7 +1203,7 @@ class CollaborativeFeatureLearning(nn.Module):
         B = aligned[names[0]].shape[0]
         H, W = min_h, min_w
         feat_list = [aligned.get(n, torch.zeros(B, self.feature_dim, H, W, device=expert_outputs[0].device))
-                     for n in ['hat', 'dat', 'nafnet'][:self.num_experts]]
+                     for n in ['drct', 'grl', 'nafnet', 'mamba'][:self.num_experts]]
         stacked = torch.stack(feat_list, dim=1)  # [B, E, C, H, W]
         
         # Reshape for attention: [B*H*W, E, C]
@@ -1456,8 +1458,8 @@ def test_frequency_aware_fusion():
     
     # Test with dict input
     expert_dict = {
-        'hat': expert_outputs[0],
-        'mambair': expert_outputs[1],
+        'drct':   expert_outputs[0],
+        'grl':    expert_outputs[1],
         'nafnet': expert_outputs[2]
     }
     fused_sr_dict = fusion(lr_input, expert_dict)

@@ -60,6 +60,30 @@ class CheckpointManager:
         # Track best checkpoints: List of (metric_value, checkpoint_path)
         self.best_checkpoints: List[tuple] = []
         
+        # CRITICAL FIX: Reconstruct memory from existing best checkpoint files
+        # Without this, is_best() returns True for ANY score after restart,
+        # causing lower scores to be saved as "NEW BEST" (the amnesia bug).
+        best_files = list(self.checkpoint_dir.glob('best_*.pth'))
+        for f in best_files:
+            try:
+                parts = f.stem.split(self.metric_name)
+                if len(parts) > 1:
+                    metric_val = float(parts[-1])
+                    self.best_checkpoints.append((metric_val, str(f)))
+            except (ValueError, IndexError):
+                continue
+        
+        if self.mode == 'max':
+            self.best_checkpoints.sort(key=lambda x: x[0], reverse=True)
+        else:
+            self.best_checkpoints.sort(key=lambda x: x[0])
+        self.best_checkpoints = self.best_checkpoints[:self.keep_best_k]
+        
+        if self.best_checkpoints:
+            print(f"  Restored {len(self.best_checkpoints)} best checkpoint(s) from disk")
+            for val, path in self.best_checkpoints:
+                print(f"    • {Path(path).name} ({self.metric_name}={val:.2f})")
+        
         # Training history
         self.history_file = self.checkpoint_dir / 'training_history.json'
         self.history = self._load_history()
@@ -194,7 +218,7 @@ class CheckpointManager:
             Checkpoint dictionary
         """
         map_location = device if device else 'cpu'
-        checkpoint = torch.load(checkpoint_path, map_location=map_location)
+        checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
         
         # Load model weights
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -457,6 +481,27 @@ def test_checkpoint_manager():
     ema.apply(model)
     ema.restore(model, backup)
     print("    EMA update, apply, restore: OK")
+    print("  [PASSED]")
+    
+    print("\n--- Test 6: Resume Amnesia Fix ---")
+    # Simulate restart: create a NEW manager on the SAME directory
+    manager2 = CheckpointManager(
+        checkpoint_dir=str(temp_dir / 'checkpoints'),
+        keep_best_k=2,
+        save_every=5,
+        metric_name='psnr',
+        mode='max'
+    )
+    # It should have reconstructed best_checkpoints from disk
+    assert len(manager2.best_checkpoints) > 0, "best_checkpoints should be reconstructed from disk!"
+    best_val = manager2.best_checkpoints[0][0]
+    print(f"    Reconstructed {len(manager2.best_checkpoints)} best checkpoint(s)")
+    print(f"    Best metric: {best_val:.2f}")
+    # A lower score should NOT be considered "best"
+    assert not manager2.is_best(best_val - 1.0), "Lower score should NOT be best after reconstruction!"
+    # A higher score SHOULD be considered best
+    assert manager2.is_best(best_val + 1.0), "Higher score SHOULD be best!"
+    print("    is_best() correctly rejects lower scores after resume")
     print("  [PASSED]")
     
     # Cleanup

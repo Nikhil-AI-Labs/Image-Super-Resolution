@@ -1,9 +1,12 @@
 """
 scripts/extract_features_balanced.py
 =====================================
-Single-GPU Feature Extractor — Phase 3 (4 Experts: HAT, DRCT, GRL, EDSR)
+Single-GPU Feature Extractor (3 Local Experts: DRCT, GRL, NAFNet)
 
-Uses forward_all_with_hooks() — the Phase 2 API — so no manual hook wiring needed.
+Uses forward_all_with_hooks() so no manual hook wiring needed.
+
+MambaIR features are NOT extracted here — use scripts/extract_mamba_features.py
+on Colab/Kaggle for that (Decoupled Compute Paradigm).
 
 Output format (backward-compatible with CachedSRDataset):
   {cache_dir}/
@@ -56,12 +59,13 @@ def extract_split(
     args,
 ) -> tuple:
     """
-    Extract and cache all 4 expert outputs + intermediate features for one split.
+    Extract and cache all 3 local expert outputs + intermediate features for one split.
 
-    Saves two files per image (backward-compatible with CachedSRDataset):
-      {stem}_hat_part.pt  → {'outputs': {'hat':...}, 'features': {'hat':...}, 'lr':..., 'hr':...}
-      {stem}_rest_part.pt → {'outputs': {'drct':..., 'grl':..., 'edsr':...},
-                              'features': {'drct':..., 'grl':..., 'edsr':...}}
+    Saves two files per image (matches CachedSRDataset expectations):
+      {stem}_drct_part.pt  -> {'outputs': {'drct':...}, 'features': {'drct':...}, 'lr':..., 'hr':...}
+      {stem}_rest_part.pt  -> {'outputs': {'grl':..., 'nafnet':...},
+                               'features': {'grl':..., 'nafnet':...}}
+    MambaIR features come from extract_mamba_features.py (Colab/Kaggle).
     """
     from src.models.expert_loader import ExpertEnsemble
     from src.data.dataset import SRDataset
@@ -101,7 +105,7 @@ def extract_split(
 
     loaded = [k for k, v in load_results.items() if v]
     failed = [k for k, v in load_results.items() if not v]
-    print(f"  Loaded ({len(loaded)}/4): {loaded}")
+    print(f"  Loaded ({len(loaded)}/3): {loaded}")
     if failed:
         print(f"  FAILED:               {failed}")
         if len(loaded) == 0:
@@ -130,21 +134,21 @@ def extract_split(
         for idx in pbar:
             sample   = dataset[idx]
             stem     = Path(sample['filename']).stem
-            hat_path  = save_dir / f"{stem}_hat_part.pt"
+            drct_path = save_dir / f"{stem}_drct_part.pt"
             rest_path = save_dir / f"{stem}_rest_part.pt"
 
-            if args.resume and hat_path.exists() and rest_path.exists():
+            if args.resume and drct_path.exists() and rest_path.exists():
                 skipped += 1
                 continue
 
             lr = sample['lr'].unsqueeze(0).to(device)   # [1, 3, H, W]
 
             try:
-                # ONE call runs all 4 experts + captures intermediate features
+                # ONE call runs all 3 local experts + captures intermediate features
                 # Returns:
-                #   outputs:  {'hat':[1,3,H*4,W*4], 'drct':..., 'grl':..., 'edsr':...}
-                #   features: {'hat':[1,180,H,W], 'drct':[1,180,H,W],
-                #              'grl':[1,180,H,W],  'edsr':[1,256,H,W]}
+                #   outputs:  {'drct':[1,3,H*4,W*4], 'grl':..., 'nafnet':...}
+                #   features: {'drct':[1,180,H,W], 'grl':[1,180,H,W],
+                #              'nafnet':[1,64,H,W]}
                 outputs, features = ensemble.forward_all_with_hooks(lr)
 
             except Exception as e:
@@ -152,29 +156,27 @@ def extract_split(
                 print(f"\n  [ERROR] {stem}: {e}")
                 continue
 
-            # ── HAT part (includes LR / HR for dataset reconstruction) ──────
+            # ── DRCT part (includes LR / HR for dataset reconstruction) ──────
             lh, lw = sample['lr'].shape[-2], sample['lr'].shape[-1]
 
             torch.save({
-                'outputs':  {'hat': outputs['hat'].cpu()},
-                'features': {'hat': features.get(
-                    'hat', torch.zeros(1, 180, lh, lw)).cpu()},
+                'outputs':  {'drct': outputs.get('drct', torch.zeros(1, 3, lh*4, lw*4)).cpu()},
+                'features': {'drct': features.get(
+                    'drct', torch.zeros(1, 180, lh, lw)).cpu()},
                 'lr':       sample['lr'],   # [3, H, W] CPU
                 'hr':       sample['hr'],   # [3, H*4, W*4] CPU
                 'filename': stem,
-            }, hat_path)
+            }, drct_path)
 
-            # ── Rest part (DRCT + GRL + EDSR) ────────────────────────────────
+            # ── Rest part (GRL + NAFNet) ───────────────────────────────────────
             torch.save({
                 'outputs': {
-                    'drct': outputs.get('drct', torch.zeros(1, 3, lh*4, lw*4)).cpu(),
-                    'grl':  outputs.get('grl',  torch.zeros(1, 3, lh*4, lw*4)).cpu(),
-                    'edsr': outputs.get('edsr', torch.zeros(1, 3, lh*4, lw*4)).cpu(),
+                    'grl':    outputs.get('grl',    torch.zeros(1, 3, lh*4, lw*4)).cpu(),
+                    'nafnet': outputs.get('nafnet', torch.zeros(1, 3, lh*4, lw*4)).cpu(),
                 },
                 'features': {
-                    'drct': features.get('drct', torch.zeros(1, 180, lh, lw)).cpu(),
-                    'grl':  features.get('grl',  torch.zeros(1, 180, lh, lw)).cpu(),
-                    'edsr': features.get('edsr', torch.zeros(1, 256, lh, lw)).cpu(),
+                    'grl':    features.get('grl',    torch.zeros(1, 180, lh, lw)).cpu(),
+                    'nafnet': features.get('nafnet', torch.zeros(1, 64,  lh, lw)).cpu(),
                 },
                 'filename': stem,
             }, rest_path)
@@ -191,13 +193,13 @@ def extract_split(
 
     # ── Summary ────────────────────────────────────────────────────────────
     elapsed = time.time() - t0
-    n_hat  = len(list(save_dir.glob("*_hat_part.pt")))
+    n_drct = len(list(save_dir.glob("*_drct_part.pt")))
     n_rest = len(list(save_dir.glob("*_rest_part.pt")))
     print(f"\n  {split_name.upper()} complete in {elapsed/60:.1f} min")
     print(f"  Processed: {processed}  |  Skipped: {skipped}  |  Errors: {errors}")
-    print(f"  Files on disk — hat_parts: {n_hat}  rest_parts: {n_rest}")
-    if n_hat != n_rest:
-        print(f"  WARNING: hat/rest counts mismatch! Run again with --resume to fix.")
+    print(f"  Files on disk — drct_parts: {n_drct}  rest_parts: {n_rest}")
+    if n_drct != n_rest:
+        print(f"  WARNING: drct/rest counts mismatch! Run again with --resume to fix.")
 
     return len(indices), elapsed
 

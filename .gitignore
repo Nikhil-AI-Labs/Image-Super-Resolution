@@ -1,29 +1,65 @@
 # ==============================================================================
-# NTIRE 2025 Image Super-Resolution - Git Ignore
+# NTIRE 2026 Image Super-Resolution (×4) — .gitignore
+# Team 29: Anant_SVNIT (FreqFusionSR)
 # ==============================================================================
-# Only excludes large binary files (pretrained weights, model checkpoints)
-# All source code, configs, and scripts should be committed
+# Keep: all source code, configs, scripts, factsheet, utils, README, LICENSE
+# Exclude: model weights, datasets, outputs, logs, build artifacts
 # ==============================================================================
 
 # ==============================================================================
-# PRETRAINED MODEL WEIGHTS (Large binary files)
+# MODEL WEIGHTS (large binary files — download links in model_zoo/)
 # ==============================================================================
-# PyTorch checkpoints
 *.pth
 *.pt
 *.ckpt
 *.bin
-
-# Safetensors format
 *.safetensors
-
-# ONNX models
 *.onnx
 
+# Mamba wheels (pre-compiled)
+mamba_wheels/
+*.whl
+
 # ==============================================================================
-# SPECIFIC WEIGHT DIRECTORIES
+# PRETRAINED / CHECKPOINT DIRECTORIES
 # ==============================================================================
-checkpoints/pretrained_weights/
+pretrained/
+checkpoints/
+
+# Keep the model_zoo download link files
+!model_zoo/
+!model_zoo/**/*.txt
+
+# ==============================================================================
+# DATASETS (users download separately)
+# ==============================================================================
+dataset/
+data/
+DIV2K*/
+Flickr2K*/
+
+# Image files in any data directories
+data/**/*.png
+data/**/*.jpg
+dataset/**/*.png
+dataset/**/*.jpg
+
+# ==============================================================================
+# OUTPUTS / RESULTS / SUBMISSIONS
+# ==============================================================================
+outputs/
+results/
+NTIRE2026-ImageSRx4/
+submit*/
+*.zip
+
+# ==============================================================================
+# LOGS
+# ==============================================================================
+logs/
+runs/
+*.log
+wandb/
 
 # ==============================================================================
 # PYTHON ARTIFACTS
@@ -69,7 +105,7 @@ env/
 .project
 
 # ==============================================================================
-# JUPYTER NOTEBOOKS
+# JUPYTER
 # ==============================================================================
 .ipynb_checkpoints/
 
@@ -81,17 +117,13 @@ Thumbs.db
 desktop.ini
 
 # ==============================================================================
-# LOGS & CACHE
+# CACHE & TEMP
 # ==============================================================================
-*.log
 *.cache
 .pytest_cache/
 
-# TensorBoard
-runs/
-
 # ==============================================================================
-# TEMPORARY ANALYSIS & OUTPUT FILES
+# TEMPORARY / ANALYSIS FILES
 # ==============================================================================
 analyze_dat.py
 analyze_dat_simple.py
@@ -104,23 +136,26 @@ scripts/phase*_output.txt
 scripts/phase1_final_results.txt
 
 # ==============================================================================
-# LARGE DATASET FILES (users download separately)
+# LARGE FILES (PDFs, compiled factsheets)
 # ==============================================================================
-# Only ignore actual image files in data, not the directory structure
-data/**/*.png
-data/**/*.jpg
-data/**/*.jpeg
-data/**/*.bmp
-data/**/*.tif
-data/**/*.tiff
-dataset/**/*.png
-dataset/**/*.jpg
+NTIRE.pdf
+NTIRE_2026_Image_Super_Resolution__x4__Challenge_Factsheet.pdf
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.out
+*.synctex.gz
 
 # ==============================================================================
-# KEEP THESE DIRECTORIES (add .gitkeep to commit empty folders)
+# KEEP THESE (tracked files)
 # ==============================================================================
-# Don't ignore these - we want the structure:
-# !checkpoints/.gitkeep
-# !pretrained/.gitkeep
-# !outputs/.gitkeep
-# !results/.gitkeep
+!.gitignore
+!.gitkeep
+!README.md
+!LICENSE
+!requirements.txt
+!test.py
+!eval.py
+!train.py

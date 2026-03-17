@@ -1,0 +1,28 @@
+# FreqFusionSR — Pre-trained Model Weights
+# Team 29: Anant_SVNIT
+# NTIRE 2026 Image Super-Resolution (×4) Challenge
+#
+# Total model size exceeds 100 MB. Download all weights from:
+#
+# Google Drive:
+# https://drive.google.com/file/d/12JvYplsdrfqzgBLFceQdfiLQWy5dC-91/view?usp=sharing
+#
+# GitHub Repository:
+# https://github.com/Nikhil-AI-Labs/Image-Super-Resolution
+#
+# Required weight files (place in this directory):
+# ─────────────────────────────────────────────────
+#   DRCT-L_X4.pth              — DRCT-L expert (×4 SR)
+#   GRL-B_SR_x4.pth            — GRL-B expert (×4 SR)
+#   NAFNet-SIDD-width64.pth    — NAFNet-SIDD expert (denoiser)
+#   MambaIR_x4.pth             — MambaIR expert (×4 SR)
+#   fusion_best.pth            — Trained fusion network checkpoint
+#
+# After downloading, your directory should look like:
+#   model_zoo/team29_FreqFusionSR/
+#   ├── DRCT-L_X4.pth
+#   ├── GRL-B_SR_x4.pth
+#   ├── NAFNet-SIDD-width64.pth
+#   ├── MambaIR_x4.pth
+#   ├── fusion_best.pth
+#   └── team29_FreqFusionSR.txt  (this file)

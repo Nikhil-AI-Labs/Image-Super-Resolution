@@ -4,7 +4,8 @@ Complete Enhanced Multi-Expert Fusion Architecture - V2  (Phase 3 — Championsh
 NTIRE 2025 Championship Strategy — Target: 35.5 dB PSNR
 
 Championship Architecture:
-  Phase 1: Expert Processing (frozen HAT-L + DRCT-L + GRL-B + EDSR-L)
+  Phase 1: Expert Processing (frozen DRCT-L + GRL-B + NAFNet-64 + MambaIR-180)
+           MambaIR features are pre-extracted on Colab/Kaggle (Decoupled Compute)
   Phase 2: Multi-Domain Frequency Decomposition  (DCT+DWT+FFT → 9 bands → 3 guidance)  +0.15 dB
   Phase 3: Cross-Band Attention + LKA (k=21)     (9-band attention + global context)   +0.20 dB
   Phase 4: Collaborative Feature Learning + LKA   (cross-expert attention + modulation)  +0.20 dB
@@ -12,7 +13,8 @@ Championship Architecture:
   Phase 6: Dynamic Expert Selection               (pixel-difficulty gating)              +0.30 dB
   Phase 7: Deep Refinement + Laplacian Edge Enh   (CNN + bilinear residual + Laplacian)  +0.10 dB
 
-Trainable params: ~1.2M   Frozen: ~131.7M (40.85+27.58+20.20+43.09)
+Trainable params: ~1.2M   Frozen: ~115M (DRCT-L 27.58M + GRL-B 20.20M + NAFNet-64 67M)
+MambaIR features loaded from disk (not counted in frozen params).
 """
 
 import torch
@@ -191,7 +193,7 @@ class CrossBandAttention(nn.Module):
 
 
 # =============================================================================
-# Collaborative Feature Learning  (UPDATED: 4 experts, new channel map)
+# Collaborative Feature Learning  (UPDATED: DRCT+GRL+NAFNet+MambaIR)
 # =============================================================================
 
 class CollaborativeFeatureLearning(nn.Module):
@@ -199,15 +201,15 @@ class CollaborativeFeatureLearning(nn.Module):
     Collaborative Feature Learning via Cross-Expert Attention.
 
     Experts share intermediate features so they can see what others detected:
-      - HAT  (180ch) shares high-freq transformer features   with DRCT / GRL / EDSR
-      - DRCT (180ch) shares dense-residual features          with HAT  / GRL / EDSR
-      - GRL  (180ch) shares global/regional/local features  with HAT  / DRCT / EDSR
-      - EDSR (256ch) shares pure-conv deep features          with HAT  / DRCT / GRL
+      - DRCT   (180ch) shares dense-residual transformer features
+      - GRL    (180ch) shares global/regional/local features
+      - NAFNet  (64ch) shares pure nonlinear-activation-free CNN features
+      - MambaIR(180ch) shares linear state-space model features
+
+    Maximum orthogonality: Swin-Transformer (DRCT) + Multi-scale window
+    transformer (GRL) + pure nonlinear CNN (NAFNet) + linear SSM (MambaIR).
 
     Expected gain: +0.20 dB PSNR
-
-    Phase 3 change: expert_channels default updated from
-        {'hat':180,'dat':180,'nafnet':64}  →  {'hat':180,'drct':180,'grl':180,'edsr':256}
     """
 
     def __init__(
@@ -218,13 +220,13 @@ class CollaborativeFeatureLearning(nn.Module):
     ):
         super().__init__()
 
-        # ── Phase 3: updated defaults ────────────────────────────────────────
+        # ── Updated defaults: DRCT+GRL+NAFNet+MambaIR ────────────────────────
         if expert_channels is None:
             expert_channels = {
-                'hat':  180,
-                'drct': 180,
-                'grl':  180,
-                'edsr': 256,
+                'drct':   180,
+                'grl':    180,
+                'nafnet':  64,
+                'mamba':  180,
             }
 
         self.common_dim  = common_dim
@@ -258,9 +260,10 @@ class CollaborativeFeatureLearning(nn.Module):
     ) -> List[torch.Tensor]:
         """
         Args:
-            expert_features: {'hat':[B,180,H,W], 'drct':[B,180,H,W],
-                               'grl':[B,180,H,W], 'edsr':[B,256,H,W]}
-                              (autograd-compatible — from forward_all_with_hooks)
+            expert_features: {'drct':[B,180,H,W], 'grl':[B,180,H,W],
+                               'nafnet':[B,64,H,W], 'mamba':[B,180,H,W]}
+                              (autograd-compatible — from forward_all_with_hooks
+                               or loaded from cached .pt files)
             expert_outputs:  List of [B,3,H*4,W*4] from each expert
         Returns:
             enhanced_outputs: List of [B,3,H*4,W*4] modulated outputs
@@ -353,30 +356,58 @@ class MultiResolutionFusion(nn.Module):
         expert_outputs: List[torch.Tensor],
     ) -> torch.Tensor:
         """
+        Hierarchical multi-resolution fusion.
+        Dynamic Progressive Upsampling based on LR input size.
+
         Args:
             lr_input:       [B, 3, H, W]
             expert_outputs: List of [B, 3, H*4, W*4]
         Returns:
             fused: [B, 3, H*4, W*4]
         """
-        experts_64  = [F.interpolate(e, size=64,  mode='bilinear', align_corners=False) for e in expert_outputs]
-        experts_128 = [F.interpolate(e, size=128, mode='bilinear', align_corners=False) for e in expert_outputs]
-        experts_256 = expert_outputs
+        # Read the exact spatial size of the incoming LR image
+        B, C, H_lr, W_lr = lr_input.shape
 
-        def _fuse(lr_sz, experts, router):
-            lr   = F.interpolate(lr_input, size=lr_sz, mode='bilinear', align_corners=False)
-            r    = router(lr).unsqueeze(2)             # [B, E, 1, H, W]
-            stk  = torch.stack(experts, dim=1)         # [B, E, 3, H, W]
+        # Dynamic resolutions based on multiplier (no hardcoded sizes!)
+        h1, w1 = H_lr, W_lr               # Level 1: Coarse (1× LR scale)
+        h2, w2 = H_lr * 2, W_lr * 2       # Level 2: Mid    (2× LR scale)
+        h3, w3 = H_lr * 4, W_lr * 4       # Level 3: Fine   (4× LR scale)
+
+        # Scale expert outputs down to dynamic intermediate sizes
+        experts_s1 = [F.interpolate(e, size=(h1, w1), mode='bilinear', align_corners=False) for e in expert_outputs]
+        experts_s2 = [F.interpolate(e, size=(h2, w2), mode='bilinear', align_corners=False) for e in expert_outputs]
+        # Level 3 experts are already at 4× HR scale — no interpolation needed
+        experts_s3 = expert_outputs
+
+        def _fuse(tgt_size, experts, router):
+            """Interpolate lr_input to tgt_size, compute routing weights, apply weighted sum."""
+            lr   = F.interpolate(lr_input, size=tgt_size, mode='bilinear', align_corners=False)
+            r    = router(lr).unsqueeze(2)             # [B, E, 1, h, w]
+            stk  = torch.stack(experts, dim=1)         # [B, E, 3, h, w]
             return (stk * r).sum(dim=1)
 
-        fused_64  = _fuse(64,  experts_64,  self.router_64)
-        fused_128 = F.interpolate(fused_64, size=128, mode='bilinear', align_corners=False) \
-                    + self.res_weight_128 * (_fuse(128, experts_128, self.router_128)
-                                             - F.interpolate(fused_64, size=128, mode='bilinear', align_corners=False))
-        fused_256 = F.interpolate(fused_128, size=256, mode='bilinear', align_corners=False) \
-                    + self.res_weight_256 * (_fuse(256, experts_256, self.router_256)
-                                             - F.interpolate(fused_128, size=256, mode='bilinear', align_corners=False))
-        return fused_256
+        # Level 1 — Coarse
+        fused_s1 = _fuse((h1, w1), experts_s1, self.router_64)
+
+        # Level 2 — Mid
+        fused_s2 = (
+            F.interpolate(fused_s1, size=(h2, w2), mode='bilinear', align_corners=False)
+            + self.res_weight_128 * (
+                _fuse((h2, w2), experts_s2, self.router_128)
+                - F.interpolate(fused_s1, size=(h2, w2), mode='bilinear', align_corners=False)
+            )
+        )
+
+        # Level 3 — Full HR
+        fused_s3 = (
+            F.interpolate(fused_s2, size=(h3, w3), mode='bilinear', align_corners=False)
+            + self.res_weight_256 * (
+                _fuse((h3, w3), experts_s3, self.router_256)
+                - F.interpolate(fused_s2, size=(h3, w3), mode='bilinear', align_corners=False)
+            )
+        )
+
+        return fused_s3
 
 
 # =============================================================================
@@ -388,11 +419,9 @@ class DynamicExpertSelector(nn.Module):
     Dynamic Expert Selection based on per-pixel difficulty.
 
     Estimates difficulty at each pixel and gates all experts:
-      - Easy pixels (sky, smooth):   most gate weight on EDSR
+      - Easy pixels (sky, smooth):   most gate weight on NAFNet (efficient CNN)
       - Medium pixels (texture):     DRCT + GRL dominant
-      - Hard pixels (edges/details): HAT + DRCT + GRL all contribute
-
-    Phase 3 change: num_experts default 3 → 4
+      - Hard pixels (edges/details): DRCT + GRL + MambaIR all contribute
 
     Expected gain: +0.30 dB PSNR
     """
@@ -445,18 +474,18 @@ class CompleteEnhancedFusionSR(nn.Module):
     """
     Complete Enhanced Multi-Expert Fusion — Phase 3.
 
-    Integrates all 4 Phase 2 experts via forward_all_with_hooks() and
-    routes their outputs + intermediate features through the 7-phase pipeline.
+    Integrates 4 experts: DRCT-L + GRL-B + NAFNet-64 + MambaIR-180.
+    Local experts (DRCT, GRL, NAFNet) run via forward_all_with_hooks().
+    MambaIR features are pre-extracted on Colab/Kaggle and loaded from disk.
 
-    Key Phase 3 differences from original V2:
-      - No ExpertFeatureExtractor — Phase 2 expert_loader handles hooks natively
-      - Phase 1 uses expert_ensemble.forward_all_with_hooks(lr_input)
-        which returns (outputs_dict, features_dict) with autograd-compatible features
-      - CollaborativeFeatureLearning uses 4-expert channel map
+    Key features:
+      - Decoupled Compute: MambaIR runs on cloud GPU, features cached as .pt
+      - 3 local experts loaded in ExpertEnsemble (DRCT, GRL, NAFNet)
       - forward_with_precomputed() supports 10-20x faster cached training
+      - Maximum orthogonality: Swin-Transformer + Multi-scale + CNN + SSM
 
-    Frozen params:    ~131.7M  (HAT-L 40.85M + DRCT-L 27.58M + GRL-B 20.20M + EDSR-L 43.09M)
-    Trainable params: ~1.2M    (fusion_dim=128, refine_channels=128, refine_depth=6, base_channels=64)
+    Frozen params:    ~115M   (DRCT-L 27.58M + GRL-B 20.20M + NAFNet-64 ~67M)
+    Trainable params: ~1.2M   (fusion_dim=128, refine_channels=128, refine_depth=6)
     """
 
     def __init__(
@@ -479,6 +508,7 @@ class CompleteEnhancedFusionSR(nn.Module):
         super().__init__()
 
         self.expert_ensemble            = expert_ensemble
+        self.cached_mode                = (expert_ensemble is None)
         self.num_experts                = num_experts
         self.upscale                    = upscale
         self.enable_dynamic_selection   = enable_dynamic_selection
@@ -573,17 +603,22 @@ class CompleteEnhancedFusionSR(nn.Module):
         H_hr, W_hr = H * self.upscale, W * self.upscale
         intermediates = {}
 
+        if self.cached_mode:
+            raise RuntimeError(
+                "Cannot call forward() in cached mode (expert_ensemble=None). "
+                "Use forward_with_precomputed() instead."
+            )
+
         # ─────────────────────────────────────────────────────────────────────
         # PHASE 1: Expert Processing + Feature Extraction
         #
-        # forward_all_with_hooks() runs all 4 experts under no_grad,
-        # then returns:
-        #   expert_outputs:  {'hat':[B,3,256,256], 'drct':..., 'grl':..., 'edsr':...}
-        #   expert_features: {'hat':[B,180,H,W], 'drct':[B,180,H,W],
-        #                     'grl':[B,180,H,W],  'edsr':[B,256,H,W]}
+        # forward_all_with_hooks() runs 3 local experts under no_grad:
+        #   expert_outputs:  {'drct':[B,3,256,256], 'grl':..., 'nafnet':...}
+        #   expert_features: {'drct':[B,180,H,W], 'grl':[B,180,H,W],
+        #                     'nafnet':[B,64,H,W]}
         #
-        # Features are AUTOGRAD-COMPATIBLE (cloned outside inference_mode
-        # in expert_loader.py — Phase 2 guarantee).
+        # MambaIR features must be passed via forward_with_precomputed().
+        # For live forward, MambaIR is NOT available (use cached mode).
         # ─────────────────────────────────────────────────────────────────────
         expert_outputs, expert_features = \
             self.expert_ensemble.forward_all_with_hooks(lr_input)
@@ -618,8 +653,8 @@ class CompleteEnhancedFusionSR(nn.Module):
 
         Args:
             lr_input:     [B, 3, H, W]
-            expert_imgs:  {'hat':[B,3,H*4,W*4], 'drct':..., 'grl':..., 'edsr':...}
-            expert_feats: {'hat':[B,180,H,W], 'drct':..., 'grl':..., 'edsr':[B,256,H,W]}
+            expert_imgs:  {'drct':[B,3,H*4,W*4], 'grl':..., 'nafnet':..., 'mamba':...}
+            expert_feats: {'drct':[B,180,H,W], 'grl':..., 'nafnet':[B,64,H,W], 'mamba':[B,180,H,W]}
                           (may be None or partial — collaborative phase degrades gracefully)
         Returns:
             sr_output: [B, 3, H*4, W*4]
@@ -627,9 +662,12 @@ class CompleteEnhancedFusionSR(nn.Module):
         B, C, H, W = lr_input.shape
         H_hr, W_hr = H * self.upscale, W * self.upscale
 
-        expert_names      = list(expert_imgs.keys())
-        expert_output_list = [expert_imgs[n] for n in expert_names]
-        expert_features   = expert_feats if expert_feats is not None else {}
+        # Enforce exact expert ordering regardless of dictionary key layout
+        expert_order = ['drct', 'grl', 'nafnet', 'mamba']
+        expert_output_list = [expert_imgs[k] for k in expert_order if k in expert_imgs]
+        expert_features    = {}
+        if expert_feats is not None:
+            expert_features = {k: expert_feats[k] for k in expert_order if k in expert_feats}
 
         return self._run_pipeline(
             lr_input, expert_output_list, expert_features,
@@ -651,7 +689,7 @@ class CompleteEnhancedFusionSR(nn.Module):
         return_intermediates: bool,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict]]:
 
-        expert_names = ['hat', 'drct', 'grl', 'edsr'][:self.num_experts]
+        expert_names = ['drct', 'grl', 'nafnet', 'mamba'][:self.num_experts]
         routing_lr = lr_input
 
         # ── Phase 2: Multi-Domain Frequency Decomposition (DCT+DWT+FFT) ───
@@ -750,7 +788,11 @@ class CompleteEnhancedFusionSR(nn.Module):
         bilinear = F.interpolate(
             lr_input, size=(H_hr, W_hr), mode='bilinear', align_corners=False,
         )
-        final_sr = (fused + self.residual_scale * bilinear).clamp(0, 1)
+        final_sr = fused + self.residual_scale * bilinear
+        # Only clamp at inference — during training, clamp kills gradients
+        # for any activation outside [0,1]
+        if not self.training:
+            final_sr = final_sr.clamp(0, 1)
 
         if return_intermediates:
             return final_sr, intermediates
@@ -859,16 +901,16 @@ def test_phase3():
             H_hr = H * 4
             with torch.no_grad():
                 outputs = {
-                    'hat':  F.interpolate(x, H_hr, mode='bilinear', align_corners=False),
-                    'drct': F.interpolate(x, H_hr, mode='bilinear', align_corners=False),
-                    'grl':  F.interpolate(x, H_hr, mode='bilinear', align_corners=False),
-                    'edsr': F.interpolate(x, H_hr, mode='bilinear', align_corners=False),
+                    'drct':   F.interpolate(x, H_hr, mode='bilinear', align_corners=False),
+                    'grl':    F.interpolate(x, H_hr, mode='bilinear', align_corners=False),
+                    'nafnet': F.interpolate(x, H_hr, mode='bilinear', align_corners=False),
+                    'mamba':  F.interpolate(x, H_hr, mode='bilinear', align_corners=False),
                 }
             features = {
-                'hat':  torch.randn(B, 180, H, W, requires_grad=False),
-                'drct': torch.randn(B, 180, H, W, requires_grad=False),
-                'grl':  torch.randn(B, 180, H, W, requires_grad=False),
-                'edsr': torch.randn(B, 256, H, W, requires_grad=False),
+                'drct':   torch.randn(B, 180, H, W, requires_grad=False),
+                'grl':    torch.randn(B, 180, H, W, requires_grad=False),
+                'nafnet': torch.randn(B, 64,  H, W, requires_grad=False),
+                'mamba':  torch.randn(B, 180, H, W, requires_grad=False),
             }
             return outputs, features
 
@@ -909,10 +951,10 @@ def test_phase3():
             num_experts=4, feature_dim=128
         ).to(device)
         feats = {
-            'hat':  torch.randn(1, 180, 64, 64).to(device),
-            'drct': torch.randn(1, 180, 64, 64).to(device),
-            'grl':  torch.randn(1, 180, 64, 64).to(device),
-            'edsr': torch.randn(1, 256, 64, 64).to(device),
+            'drct':   torch.randn(1, 180, 64, 64).to(device),
+            'grl':    torch.randn(1, 180, 64, 64).to(device),
+            'nafnet': torch.randn(1, 64,  64, 64).to(device),
+            'mamba':  torch.randn(1, 180, 64, 64).to(device),
         }
         outs = [torch.randn(1, 3, 256, 256).to(device)] * 4
         enh = ecl(feats, outs)
@@ -930,10 +972,10 @@ def test_phase3():
             num_experts=4, base_channels=64
         ).to(device)
         expert_dict = {
-            'hat':  torch.randn(1, 3, 256, 256).to(device),
-            'drct': torch.randn(1, 3, 256, 256).to(device),
-            'grl':  torch.randn(1, 3, 256, 256).to(device),
-            'edsr': torch.randn(1, 3, 256, 256).to(device),
+            'drct':   torch.randn(1, 3, 256, 256).to(device),
+            'grl':    torch.randn(1, 3, 256, 256).to(device),
+            'nafnet': torch.randn(1, 3, 256, 256).to(device),
+            'mamba':  torch.randn(1, 3, 256, 256).to(device),
         }
         fuse = hmrf(expert_dict)
         ok = fuse.shape == (1, 3, 256, 256)
@@ -999,12 +1041,12 @@ def test_phase3():
     # ── 9. Cached forward path ────────────────────────────────────────
     print("\n[9] forward_with_precomputed() — cached path")
     try:
-        expert_imgs = {n: torch.randn(1, 3, 256, 256).to(device) for n in ['hat','drct','grl','edsr']}
+        expert_imgs = {n: torch.randn(1, 3, 256, 256).to(device) for n in ['drct','grl','nafnet','mamba']}
         expert_feats = {
-            'hat':  torch.randn(1, 180, 64, 64).to(device),
-            'drct': torch.randn(1, 180, 64, 64).to(device),
-            'grl':  torch.randn(1, 180, 64, 64).to(device),
-            'edsr': torch.randn(1, 256, 64, 64).to(device),
+            'drct':   torch.randn(1, 180, 64, 64).to(device),
+            'grl':    torch.randn(1, 180, 64, 64).to(device),
+            'nafnet': torch.randn(1, 64,  64, 64).to(device),
+            'mamba':  torch.randn(1, 180, 64, 64).to(device),
         }
         with torch.no_grad():
             sr_cached = model.forward_with_precomputed(x, expert_imgs, expert_feats)
@@ -1018,12 +1060,12 @@ def test_phase3():
     print("\n[10] Backward pass through fusion layers")
     try:
         model.train()
-        expert_imgs_t  = {n: torch.randn(1, 3, 256, 256).to(device) for n in ['hat','drct','grl','edsr']}
+        expert_imgs_t  = {n: torch.randn(1, 3, 256, 256).to(device) for n in ['drct','grl','nafnet','mamba']}
         expert_feats_t = {
-            'hat':  torch.randn(1, 180, 64, 64, requires_grad=True).to(device),
-            'drct': torch.randn(1, 180, 64, 64, requires_grad=True).to(device),
-            'grl':  torch.randn(1, 180, 64, 64, requires_grad=True).to(device),
-            'edsr': torch.randn(1, 256, 64, 64, requires_grad=True).to(device),
+            'drct':   torch.randn(1, 180, 64, 64, requires_grad=True).to(device),
+            'grl':    torch.randn(1, 180, 64, 64, requires_grad=True).to(device),
+            'nafnet': torch.randn(1, 64,  64, 64, requires_grad=True).to(device),
+            'mamba':  torch.randn(1, 180, 64, 64, requires_grad=True).to(device),
         }
         sr_t = model.forward_with_precomputed(x, expert_imgs_t, expert_feats_t)
         loss = sr_t.mean()

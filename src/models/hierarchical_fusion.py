@@ -75,11 +75,11 @@ class HierarchicalMultiResolutionFusion(nn.Module):
         Output:  feat_256 -> to_rgb -> sigmoid -> [B, 3, 256, 256]
     
     Args:
-        num_experts: Number of expert models (default: 3 = HAT, DAT, NAFNet)
+        num_experts: Number of expert models (default: 4 = DRCT, GRL, NAFNet, MambaIR)
         base_channels: Channel dimension for fusion (default: 128)
     """
     
-    def __init__(self, num_experts: int = 3, base_channels: int = 128):
+    def __init__(self, num_experts: int = 4, base_channels: int = 128):
         super().__init__()
         
         self.num_experts = num_experts
@@ -130,63 +130,74 @@ class HierarchicalMultiResolutionFusion(nn.Module):
         
     def forward(self, expert_outputs: dict) -> torch.Tensor:
         """
+        Progressive 3-stage hierarchical fusion.
+        Dynamic resolution: derives levels from input HR size (no hardcoded 64/128/256).
+
         Args:
-            expert_outputs: Dict with keys like 'hat', 'dat', 'nafnet'
-                           Each value: [B, 3, 256, 256]
-        
+            expert_outputs: Dict with keys like 'drct', 'grl', 'nafnet', 'mamba'
+                           Each value: [B, 3, H_hr, W_hr]
+
         Returns:
-            fused: [B, 3, 256, 256]
+            fused: [B, 3, H_hr, W_hr]
         """
         # Stack all expert outputs along channel dim
         expert_list = list(expert_outputs.values())
-        expert_stack = torch.cat(expert_list, dim=1)  # [B, 9, 256, 256]
-        
-        # ===== Stage 1: Coarse (64x64) =====
-        experts_64 = F.interpolate(
-            expert_stack, size=(64, 64),
+        expert_stack = torch.cat(expert_list, dim=1)  # [B, N*3, H_hr, W_hr]
+
+        # Read the exact spatial size of the incoming HR expert outputs
+        _, _, H_hr, W_hr = expert_stack.shape
+
+        # Dynamic scale levels derived from HR size (preserves aspect ratio!)
+        h1, w1 = max(H_hr // 4, 1), max(W_hr // 4, 1)  # Level 1 (Coarse)
+        h2, w2 = max(H_hr // 2, 1), max(W_hr // 2, 1)  # Level 2 (Mid)
+        # Level 3 = full HR size (H_hr, W_hr)
+
+        # ===== Stage 1: Coarse =====
+        experts_s1 = F.interpolate(
+            expert_stack, size=(h1, w1),
             mode='bilinear', align_corners=False
-        )  # [B, 9, 64, 64]
-        
-        feat_64 = self.stage1_conv(experts_64)       # [B, C, 64, 64]
-        feat_64 = self.stage1_gate(feat_64)           # spatial attention
-        feat_64 = self.stage1_res(feat_64)            # residual refinement
-        
-        # ===== Stage 2: Mid-Level (128x128) =====
-        feat_64_up = F.interpolate(
-            feat_64, size=(128, 128),
+        )
+
+        feat_s1 = self.stage1_conv(experts_s1)
+        feat_s1 = self.stage1_gate(feat_s1)
+        feat_s1 = self.stage1_res(feat_s1)
+
+        # ===== Stage 2: Mid-Level =====
+        feat_s1_up = F.interpolate(
+            feat_s1, size=(h2, w2),
             mode='bilinear', align_corners=False
-        )  # [B, C, 128, 128]
-        
-        experts_128 = F.interpolate(
-            expert_stack, size=(128, 128),
+        )
+
+        experts_s2 = F.interpolate(
+            expert_stack, size=(h2, w2),
             mode='bilinear', align_corners=False
-        )  # [B, 9, 128, 128]
-        
-        stage2_input = torch.cat([feat_64_up, experts_128], dim=1)  # [B, C+9, 128, 128]
-        feat_128 = self.stage2_conv(stage2_input)     # [B, C, 128, 128]
-        feat_128 = self.stage2_gate(feat_128)
-        feat_128 = self.stage2_res(feat_128)
-        feat_128 = feat_128 + self.residual_weight_1_2 * feat_64_up  # cross-stage residual
-        
-        # ===== Stage 3: Fine (256x256) =====
-        feat_128_up = F.interpolate(
-            feat_128, size=(256, 256),
+        )
+
+        stage2_input = torch.cat([feat_s1_up, experts_s2], dim=1)
+        feat_s2 = self.stage2_conv(stage2_input)
+        feat_s2 = self.stage2_gate(feat_s2)
+        feat_s2 = self.stage2_res(feat_s2)
+        feat_s2 = feat_s2 + self.residual_weight_1_2 * feat_s1_up
+
+        # ===== Stage 3: Fine (full HR resolution) =====
+        feat_s2_up = F.interpolate(
+            feat_s2, size=(H_hr, W_hr),
             mode='bilinear', align_corners=False
-        )  # [B, C, 256, 256]
-        
-        stage3_input = torch.cat([feat_128_up, expert_stack], dim=1)  # [B, C+9, 256, 256]
-        feat_256 = self.stage3_conv(stage3_input)     # [B, C//2, 256, 256]
-        feat_256 = self.stage3_gate(feat_256)
-        feat_256 = self.stage3_res(feat_256)
-        
-        # Cross-stage residual: 128ch -> 64ch via channel split + mean
-        feat_128_up_reduced = feat_128_up[:, :self.base_channels // 2, :, :]  # take first half
-        feat_256 = feat_256 + self.residual_weight_2_3 * feat_128_up_reduced
-        
+        )
+
+        stage3_input = torch.cat([feat_s2_up, expert_stack], dim=1)
+        feat_s3 = self.stage3_conv(stage3_input)
+        feat_s3 = self.stage3_gate(feat_s3)
+        feat_s3 = self.stage3_res(feat_s3)
+
+        # Cross-stage residual: take first half of channels
+        feat_s2_up_reduced = feat_s2_up[:, :self.base_channels // 2, :, :]
+        feat_s3 = feat_s3 + self.residual_weight_2_3 * feat_s2_up_reduced
+
         # ===== Output RGB =====
-        output = self.to_rgb(feat_256)  # [B, 3, 256, 256]
-        output = torch.sigmoid(output)  # Ensure [0, 1] range
-        
+        output = self.to_rgb(feat_s3)
+        output = torch.sigmoid(output)
+
         return output
 
 
@@ -197,7 +208,7 @@ def test_hierarchical_fusion():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     fusion = HierarchicalMultiResolutionFusion(
-        num_experts=3, base_channels=128
+        num_experts=4, base_channels=128
     ).to(device)
     
     params = sum(p.numel() for p in fusion.parameters())
@@ -205,9 +216,10 @@ def test_hierarchical_fusion():
     
     batch = 2
     expert_outputs = {
-        'hat': torch.randn(batch, 3, 256, 256, device=device),
-        'dat': torch.randn(batch, 3, 256, 256, device=device),
-        'nafnet': torch.randn(batch, 3, 256, 256, device=device)
+        'drct': torch.randn(batch, 3, 256, 256, device=device),
+        'grl': torch.randn(batch, 3, 256, 256, device=device),
+        'nafnet': torch.randn(batch, 3, 256, 256, device=device),
+        'mamba': torch.randn(batch, 3, 256, 256, device=device),
     }
     
     with torch.no_grad():

@@ -282,12 +282,12 @@ class EnhancedCollaborativeWithLKA(nn.Module):
         self.feature_dim = feature_dim
         
         # Feature alignment (raw expert channels → common dim)
-        # Phase 3 update: 4-expert roster (hook capture channels)
+        # Updated for DRCT+GRL+NAFNet+MambaIR expert roster
         self.align_layers = nn.ModuleDict({
-            'hat':  nn.Conv2d(180, feature_dim, 1),   # HAT-L  conv_after_body → 180ch
-            'drct': nn.Conv2d(180, feature_dim, 1),   # DRCT-L conv_after_body → 180ch
-            'grl':  nn.Conv2d(180, feature_dim, 1),   # GRL-B  conv_after_body → 180ch
-            'edsr': nn.Conv2d(256, feature_dim, 1),   # EDSR-L body → 256ch
+            'drct':   nn.Conv2d(180, feature_dim, 1),  # DRCT-L conv_after_body → 180ch
+            'grl':    nn.Conv2d(180, feature_dim, 1),  # GRL-B  conv_after_body → 180ch
+            'nafnet': nn.Conv2d(64,  feature_dim, 1),  # NAFNet-64 decoder output → 64ch
+            'mamba':  nn.Conv2d(180, feature_dim, 1),  # MambaIR conv_after_body → 180ch
         })
         
         # Cross-expert attention
@@ -310,12 +310,12 @@ class EnhancedCollaborativeWithLKA(nn.Module):
         # LKA global refinement (shared across experts)
         self.lka_global = LKABlock(feature_dim, kernel_size=lka_kernel, ffn_ratio=2.0)
         
-        # Per-expert modulation heads
+        # Per-expert modulation heads (spatial — NO global pool!)
         self.modulation = nn.ModuleList([
             nn.Sequential(
                 nn.Conv2d(feature_dim, feature_dim // 4, 1),
                 nn.GELU(),
-                nn.AdaptiveAvgPool2d(1),
+                # Removed AdaptiveAvgPool2d(1) to maintain spatial awareness!
                 nn.Conv2d(feature_dim // 4, 3, 1),
                 nn.Sigmoid()
             ) for _ in range(num_experts)
@@ -329,13 +329,13 @@ class EnhancedCollaborativeWithLKA(nn.Module):
         """
         Args:
             expert_features: Dict with intermediate features
-                {'hat': [B, 180, H, W], 'drct': [B, 180, H, W],
-                 'grl': [B, 180, H, W], 'edsr': [B, 256, H, W]}
+                {'drct': [B, 180, H, W], 'grl': [B, 180, H, W],
+                 'nafnet': [B, 64, H, W], 'mamba': [B, 180, H, W]}
             expert_outputs: List of SR outputs [B, 3, H_hr, W_hr]
         Returns:
             enhanced_outputs: List of enhanced SR outputs
         """
-        expert_names = ['hat', 'drct', 'grl', 'edsr'][:self.num_experts]
+        expert_names = ['drct', 'grl', 'nafnet', 'mamba'][:self.num_experts]
         
         # Step 1: Align features
         aligned = {}
@@ -417,7 +417,11 @@ class EnhancedCollaborativeWithLKA(nn.Module):
             
             # Apply soft modulation
             enhanced_out = out * (1.0 + 0.2 * (mod - 0.5))
-            enhanced_outputs.append(enhanced_out.clamp(0, 1))
+            # Only clamp at inference — during training, clamp kills gradients
+            # for any activation outside [0,1]
+            if not self.training:
+                enhanced_out = enhanced_out.clamp(0, 1)
+            enhanced_outputs.append(enhanced_out)
         
         return enhanced_outputs
 
@@ -465,18 +469,19 @@ def test_all_lka_modules():
     # Test 4: Enhanced Collaborative
     print("4. EnhancedCollaborativeWithLKA:")
     ecl = EnhancedCollaborativeWithLKA(
-        num_experts=3, feature_dim=128, num_heads=8
+        num_experts=4, feature_dim=128, num_heads=8
     ).to(device)
     p = sum(pp.numel() for pp in ecl.parameters())
     feats = {
-        'hat': torch.randn(2, 180, 64, 64, device=device),
-        'dat': torch.randn(2, 180, 64, 64, device=device),
-        'nafnet': torch.randn(2, 64, 64, 64, device=device),
+        'drct':   torch.randn(2, 180, 64, 64, device=device),
+        'grl':    torch.randn(2, 180, 64, 64, device=device),
+        'nafnet': torch.randn(2, 64,  64, 64, device=device),
+        'mamba':  torch.randn(2, 180, 64, 64, device=device),
     }
-    outputs = [torch.randn(2, 3, 256, 256, device=device) for _ in range(3)]
+    outputs = [torch.randn(2, 3, 256, 256, device=device) for _ in range(4)]
     enhanced = ecl(feats, outputs)
-    print(f"   Params: {p:,}, Experts: {len(outputs)} → {len(enhanced)}")
-    assert len(enhanced) == 3
+    print(f"   Params: {p:,}, Experts: {len(outputs)} -> {len(enhanced)}")
+    assert len(enhanced) == 4
     for e in enhanced:
         assert e.shape == outputs[0].shape
     
